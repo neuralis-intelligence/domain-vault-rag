@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # Qdrant vector database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+
+  # Ollama LLM service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # If no GPU, comment out the deploy section above
+
+  # FastAPI backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: complaint_insights_api
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=http://ollama:11434
+      - BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/bigquery-key.json
+    volumes:
+      - ./app:/app/app
+      - ./credentials:/app/credentials
+    depends_on:
+      - qdrant
+      - ollama
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Streamlit UI
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: complaint_insights_ui
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    volumes:
+      - ./ui:/app/ui
+    depends_on:
+      - api
+    restart: unless-stopped
+    command: streamlit run ui/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+
+volumes:
+  qdrant_storage:
+    driver: local
+  ollama_models:
+    driver: local

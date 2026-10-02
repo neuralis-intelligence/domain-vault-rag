@@ -1,0 +1,25 @@
+{"question": "What is the most common issue at Bank of America?", "expected_route": "sql", "expected_answer_contains": ["issue", "Bank of America"]}
+{"question": "How many credit card complaints did JPMorgan Chase receive in 2023?", "expected_route": "sql", "expected_answer_contains": ["count", "number"]}
+{"question": "What are the top 5 companies by complaint volume?", "expected_route": "sql", "expected_answer_contains": ["company", "complaints"]}
+{"question": "What do customers complain about regarding Chase fraud cases?", "expected_route": "rag", "expected_answer_contains": ["customers", "fraud"]}
+{"question": "Show me examples of foreclosure complaints at Wells Fargo", "expected_route": "rag", "expected_answer_contains": ["foreclosure", "Wells Fargo"]}
+{"question": "What is the top issue at JPMorgan and what are customers saying?", "expected_route": "hybrid", "expected_answer_contains": ["issue", "customers"]}
+{"question": "How many mortgage complaints were about loan modification?", "expected_route": "sql", "expected_answer_contains": ["mortgage", "loan modification"]}
+{"question": "Which bank has the most credit card complaints?", "expected_route": "sql", "expected_answer_contains": ["bank", "credit card"]}
+{"question": "What percentage of complaints at Chase were timely responded to?", "expected_route": "sql", "expected_answer_contains": ["percentage", "timely"]}
+{"question": "Tell me about billing dispute complaints", "expected_route": "rag", "expected_answer_contains": ["billing", "dispute"]}
+{"question": "What states have the most complaints?", "expected_route": "sql", "expected_answer_contains": ["state", "complaints"]}
+{"question": "Show me complaints about identity theft", "expected_route": "rag", "expected_answer_contains": ["identity theft"]}
+{"question": "How many complaints did Bank of America receive about closing accounts?", "expected_route": "sql", "expected_answer_contains": ["Bank of America", "closing"]}
+{"question": "What are customers saying about overdraft fees?", "expected_route": "rag", "expected_answer_contains": ["customers", "overdraft"]}
+{"question": "Compare complaint volumes between Chase and Bank of America", "expected_route": "sql", "expected_answer_contains": ["Chase", "Bank of America", "compare"]}
+{"question": "What's the most complained about mortgage issue and show examples", "expected_route": "hybrid", "expected_answer_contains": ["mortgage", "issue", "examples"]}
+{"question": "How has the complaint volume changed over time?", "expected_route": "sql", "expected_answer_contains": ["time", "trend"]}
+{"question": "What do people say about credit report errors?", "expected_route": "rag", "expected_answer_contains": ["credit report", "errors"]}
+{"question": "Which product category has the most complaints?", "expected_route": "sql", "expected_answer_contains": ["product", "most"]}
+{"question": "Show me the worst customer experiences with foreclosures", "expected_route": "rag", "expected_answer_contains": ["customer", "foreclosure"]}
+{"question": "What's the average response time and show slow response examples", "expected_route": "hybrid", "expected_answer_contains": ["response time", "examples"]}
+{"question": "List the top 10 issues across all banks", "expected_route": "sql", "expected_answer_contains": ["issues", "top"]}
+{"question": "Find complaints about unauthorized charges", "expected_route": "rag", "expected_answer_contains": ["unauthorized", "charges"]}
+{"question": "What percentage of Wells Fargo complaints are disputed by consumers?", "expected_route": "sql", "expected_answer_contains": ["Wells Fargo", "disputed", "percentage"]}
+{"question": "Tell me about problems with debt collection", "expected_route": "rag", "expected_answer_contains": ["debt collection", "problems"]}
