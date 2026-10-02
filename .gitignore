@@ -1,3 +1,5 @@
 .myvenv/
 .venv/
 .ipynb_checkpoints/
+# Raw CFPB data
+banking-qa-agent/data/raw/**/*.csv
