@@ -7,8 +7,11 @@ from app.sql_tool import SQLTool, SQLValidationError, execute_sql_query
 
 @pytest.fixture
 def sql_tool():
-    # No project id -> no BigQuery client, so no credentials are needed.
-    return SQLTool(project_id=None, dataset_id="test_dataset", table_id="complaints", max_rows=100)
+    tool = SQLTool(dataset_id="test_dataset", table_id="complaints", max_rows=100)
+    # Force "unconfigured" even if .env sets BIGQUERY_PROJECT_ID (passing project_id=None
+    # falls back to settings), so unit tests never call real BigQuery.
+    tool.project_id = None
+    return tool
 
 
 class TestValidateSQL:
