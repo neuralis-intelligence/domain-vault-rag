@@ -8,7 +8,7 @@ A hybrid LLM agent that answers natural-language questions about CFPB bank compl
 
 ## Goal
 
-Enable non-technical users to query 250K+ CFPB complaint records using plain English questions, with the system automatically determining the best retrieval strategy (SQL aggregation, semantic search, or hybrid) and generating accurate, cited answers using local LLMs.
+Enable non-technical users to query ~320K CFPB complaint records (Aug 2023 – Aug 2026) using plain English questions, with the system automatically determining the best retrieval strategy (SQL aggregation, semantic search, or hybrid) and generating accurate, cited answers using local LLMs.
 
 ---
 
@@ -53,54 +53,47 @@ User → Streamlit UI → FastAPI Backend → Router (LangGraph)
 
 ```
 domain-vault-rag/
-├── README.md                   # This file
+├── README.md
 ├── LICENSE
-├── requirements.txt            # Root dependencies
-├── docker-compose.yml          # Multi-container orchestration
+├── pyproject.toml              # pytest + ruff configuration
+├── requirements.txt            # Runtime dependencies
+├── requirements-dev.txt        # + tests, linting, notebooks
+├── Dockerfile                  # Image for the API and the UI
+├── docker-compose.yml          # Qdrant (+ optional Ollama, API, UI)
 ├── .env.example                # Environment variable template
-├── .gitignore
 │
-├── banking-qa-agent/           # Existing implementation (preserved)
-│   ├── app.py
-│   ├── requirements.txt
-│   ├── data/
-│   │   ├── raw/                # Raw CFPB CSVs
-│   │   ├── processed/          # Chunked narratives
-│   │   ├── eval/               # Golden test sets
-│   │   ├── pull_cfpb.py        # Data download script
-│   │   ├── data-exploration-credit_card.ipynb
-│   │   └── data-exploration-mortgage.ipynb
-│   ├── src/
-│   │   ├── ingest.py           # Embedding pipeline
-│   │   ├── graph.py            # LangGraph workflow
-│   │   ├── router.py           # Query classification
-│   │   ├── retrieve.py         # Vector search
-│   │   └── eval.py             # Evaluation logic
-│   └── chroma_db/              # Local vector store
-│
-├── data/                       # Planned: raw CSVs (gitignored)
-│
-├── ingestion/                  # Planned: ETL pipeline
-│   ├── clean.py                # Data cleaning & schema normalization
-│   ├── load_bigquery.py        # BigQuery loader
-│   └── embed_narratives.py     # Batch embedding generation
-│
-├── app/                        # Planned: FastAPI backend
-│   ├── main.py                 # POST /ask endpoint
-│   ├── graph.py                # LangGraph router → sql/rag/hybrid
-│   ├── llm.py                  # Ollama client
-│   ├── sql_tool.py             # BigQuery text-to-SQL
+├── app/                        # FastAPI backend + agent
+│   ├── config.py               # Paths and settings (loads .env)
+│   ├── main.py                 # /ask, /health, /feedback endpoints
+│   ├── graph.py                # LangGraph router → sql/rag/hybrid → synthesis
+│   ├── router.py               # LLM query classification
+│   ├── sql_tool.py             # BigQuery text-to-SQL with guardrails
 │   ├── rag_tool.py             # Qdrant semantic search
+│   ├── llm.py                  # Ollama client + answer synthesis
 │   └── prompts/                # Prompt templates
 │
-├── ui/                         # Planned: Streamlit frontend
+├── ingestion/                  # ETL pipeline (run in this order)
+│   ├── pull_cfpb.py            # 1. Download raw CSVs from the CFPB API
+│   ├── clean.py                # 2. Clean + unify → data/processed/complaints.parquet
+│   ├── load_bigquery.py        # 3. Load BigQuery table + company aliases
+│   └── embed_narratives.py     # 4. Embed narratives into Qdrant
+│
+├── data/                       # Gitignored contents
+│   ├── raw/                    # credit_card.csv, mortgage.csv
+│   └── processed/              # complaints.parquet
+│
+├── notebooks/                  # Exploratory data analysis
+│   ├── credit_card_exploration.ipynb
+│   └── mortgage_exploration.ipynb
+│
+├── ui/
 │   └── streamlit_app.py        # Chat interface + visualizations
 │
-├── eval/                       # Planned: evaluation suite
-│   ├── questions.jsonl         # Test questions with ground truth
-│   └── run_eval.py             # Automated accuracy measurement
+├── eval/
+│   ├── questions.jsonl         # 25 test questions with expected routes
+│   └── run_eval.py             # Routing accuracy / answer quality / latency
 │
-└── tests/                      # Planned: unit & integration tests
+└── tests/                      # Unit tests (offline) + integration tests
 ```
 
 ---
@@ -108,33 +101,33 @@ domain-vault-rag/
 ## Development Roadmap
 
 ### Phase 1: Data Engineering
-- [x] Download CFPB credit card and mortgage complaint data
-- [x] Exploratory data analysis (see notebooks in `banking-qa-agent/data/`)
-- [ ] Clean and normalize to unified schema (snake_case, proper types)
-- [ ] Load into BigQuery with partitioning/clustering
-- [ ] Create company alias lookup table
+- [x] Download CFPB credit card and mortgage complaint data (`ingestion/pull_cfpb.py`)
+- [x] Exploratory data analysis (see `notebooks/`)
+- [x] Clean and normalize to unified schema (`ingestion/clean.py`)
+- [ ] Load into BigQuery with partitioning/clustering (`ingestion/load_bigquery.py` implemented, not yet run)
+- [x] Create company alias lookup table (loaded by `load_bigquery.py`)
 
 ### Phase 2: SQL Path
 - [ ] Deploy Ollama locally with Qwen2.5 7B
-- [ ] Implement text-to-SQL with schema injection
-- [ ] Add guardrails (SELECT-only, LIMIT enforcement, dry-run validation)
+- [x] Implement text-to-SQL with schema injection
+- [x] Add guardrails (SELECT-only, LIMIT enforcement, dry-run validation)
 - [ ] Validate on test questions
 
 ### Phase 3: RAG Path
-- [ ] Generate embeddings for complaint narratives
+- [ ] Generate embeddings for complaint narratives (`ingestion/embed_narratives.py` implemented, not yet run)
 - [ ] Load into Qdrant with metadata filters
-- [ ] Implement filtered semantic search
-- [ ] Build answer synthesis with citation
+- [x] Implement filtered semantic search
+- [x] Build answer synthesis with citation
 
 ### Phase 4: Agent & API
-- [ ] Build LangGraph router (sql/rag/hybrid)
-- [ ] Implement FastAPI `/ask` endpoint
-- [ ] Create Docker Compose setup
+- [x] Build LangGraph router (sql/rag/hybrid)
+- [x] Implement FastAPI `/ask` endpoint
+- [x] Create Docker Compose setup
 - [ ] Deploy Qdrant and Ollama containers
 
 ### Phase 5: UI & Evaluation
-- [ ] Build Streamlit chat interface
-- [ ] Add visualization for SQL results
+- [x] Build Streamlit chat interface
+- [x] Add visualization for SQL results
 - [ ] Run evaluation on question set
 - [ ] Document performance metrics
 
@@ -143,57 +136,56 @@ domain-vault-rag/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.9+
-- Docker & Docker Compose
-- Ollama installed locally
-- BigQuery project (for SQL path)
+- Python 3.11+ (developed on 3.13)
+- [Ollama](https://ollama.com/download) installed natively (recommended on macOS for GPU)
+- Docker (for Qdrant)
+- A Google Cloud project with BigQuery enabled + [gcloud CLI](https://cloud.google.com/sdk/docs/install) (SQL path only)
 
-### Setup
-
-1. Clone the repository:
+### 1. Install
 ```bash
-git clone <repo-url>
+git clone git@github.com:neuralis-intelligence/domain-vault-rag.git
 cd domain-vault-rag
+python3 -m venv .myvenv
+source .myvenv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env          # then set BIGQUERY_PROJECT_ID
 ```
 
-2. Create environment file:
+All commands below run from the project root with the venv active.
+
+### 2. Check the install (no services needed)
 ```bash
-cp .env.example .env
-# Edit .env with your BigQuery credentials and other settings
+pytest          # 55 offline unit tests
+ruff check .    # lint
 ```
 
-3. Install dependencies:
+### 3. Start services
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-4. Start services:
-```bash
-docker-compose up -d
-```
-
-5. Pull LLM model:
-```bash
+docker compose up -d qdrant                     # Qdrant on :6333 (dashboard: /dashboard)
+ollama serve                                    # skip if the Ollama app is running
 ollama pull qwen2.5:7b-instruct
+gcloud auth application-default login           # BigQuery credentials
 ```
 
-6. Run data ingestion (once data is prepared):
+### 4. Run the data pipeline
 ```bash
-python ingestion/clean.py
-python ingestion/load_bigquery.py
-python ingestion/embed_narratives.py
+python -m ingestion.pull_cfpb                   # optional: re-download data/raw/*.csv (slow)
+python -m ingestion.clean                       # → data/processed/complaints.parquet
+python -m ingestion.load_bigquery               # → BigQuery cfpb_complaints.complaints
+python -m ingestion.embed_narratives --limit 2000   # quick test; omit --limit for all ~147K
 ```
 
-7. Start the API:
+### 5. Run the app
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload                   # API: http://localhost:8000/docs
+streamlit run ui/streamlit_app.py               # UI:  http://localhost:8501
 ```
 
-8. Launch the UI:
+Check `curl localhost:8000/health`: it reports the status of Ollama, Qdrant and BigQuery.
+
+### Docker alternative
 ```bash
-streamlit run ui/streamlit_app.py
+docker compose --profile app up -d --build      # Qdrant + API + UI (uses host Ollama)
 ```
 
 ---
@@ -212,15 +204,25 @@ The system will automatically route to the appropriate tool and synthesize an an
 
 ## Evaluation
 
-Run the evaluation suite to measure performance:
+With the API running:
 
 ```bash
-python eval/run_eval.py
+python eval/run_eval.py                          # writes eval/eval_results.csv
 ```
 
 This measures:
 - **Routing accuracy**: Did the agent choose the right tool?
-- **Answer accuracy**: Does the response match ground truth?
+- **Answer quality**: Does the response contain the expected terms?
+- **Latency** and **error rate**
+
+## Testing
+
+```bash
+pytest                    # unit tests (offline, mocked LLM/Qdrant/BigQuery)
+pytest -m integration     # live tests against Ollama / Qdrant
+```
+
+See [tests/README.md](tests/README.md) for details.
 
 ---
 
@@ -256,4 +258,4 @@ See LICENSE file.
 
 ## Resume Summary
 
-> Built a hybrid LLM agent (LangGraph, Ollama, BigQuery, Qdrant) that answers natural-language questions over 250K+ CFPB complaints, routing between text-to-SQL and RAG; achieved X% answer accuracy on a 25-question eval set.
+> Built a hybrid LLM agent (LangGraph, Ollama, BigQuery, Qdrant) that answers natural-language questions over 320K CFPB complaints, routing between text-to-SQL and RAG; achieved X% answer accuracy on a 25-question eval set.

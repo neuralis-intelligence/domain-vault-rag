@@ -8,26 +8,30 @@ Features:
 - Query history
 """
 
-import streamlit as st
-import requests
+import os
+from typing import Any
+
 import pandas as pd
 import plotly.express as px
-from typing import Dict, Any, Optional
-import os
+import requests
+import streamlit as st
 
-# Configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+# Local LLMs can take a while: routing + SQL generation + synthesis are 3 LLM calls.
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "180"))
+REPO_URL = "https://github.com/neuralis-intelligence/domain-vault-rag"
 
 # Page config
 st.set_page_config(
     page_title="CFPB Complaint Insights",
     page_icon="🏦",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # Custom CSS
-st.markdown("""
+st.markdown(
+    """
     <style>
     .stChatMessage {
         background-color: #f0f2f6;
@@ -42,16 +46,18 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
 
-def query_api(question: str) -> Dict[str, Any]:
+def query_api(question: str) -> dict[str, Any] | None:
     """Send question to FastAPI backend."""
     try:
         response = requests.post(
             f"{API_URL}/ask",
             json={"question": question},
-            timeout=30
+            timeout=API_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         return response.json()
@@ -70,7 +76,7 @@ def visualize_sql_results(results: list, question: str):
     df = pd.DataFrame(results)
 
     # Display as table
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
     # Auto-generate chart if appropriate
     if len(df.columns) == 2 and len(df) <= 20:
@@ -81,9 +87,9 @@ def visualize_sql_results(results: list, question: str):
             x=col1,
             y=col2,
             title=f"Results: {question}",
-            labels={col1: col1.replace('_', ' ').title(), col2: col2.replace('_', ' ').title()}
+            labels={col1: col1.replace("_", " ").title(), col2: col2.replace("_", " ").title()},
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def display_rag_results(documents: list):
@@ -95,7 +101,9 @@ def display_rag_results(documents: list):
     st.subheader(f"Found {len(documents)} relevant complaints")
 
     for i, doc in enumerate(documents, 1):
-        with st.expander(f"Complaint {i}: {doc.get('company', 'Unknown')} - {doc.get('issue', 'Unknown')}"):
+        with st.expander(
+            f"Complaint {i}: {doc.get('company', 'Unknown')} - {doc.get('issue', 'Unknown')}"
+        ):
             st.markdown(f"**Complaint ID:** {doc.get('complaint_id', 'N/A')}")
             st.markdown(f"**Company:** {doc.get('company', 'N/A')}")
             st.markdown(f"**Product:** {doc.get('product', 'N/A')}")
@@ -130,7 +138,7 @@ def main():
             "How many mortgage complaints did Wells Fargo receive?",
             "What are customers saying about Chase fraud cases?",
             "Top 5 banks by complaint volume",
-            "Show me complaints about credit card fees"
+            "Show me complaints about credit card fees",
         ]
 
         for example in examples:
@@ -142,9 +150,15 @@ def main():
         # API status
         try:
             health = requests.get(f"{API_URL}/health", timeout=5).json()
-            st.success("✅ API Connected")
-        except:
+        except requests.exceptions.RequestException:
             st.error("❌ API Offline")
+        else:
+            if health.get("status") == "healthy":
+                st.success("✅ API Connected")
+            else:
+                st.warning("⚠️ API degraded")
+            for service in ("ollama", "qdrant", "bigquery"):
+                st.caption(f"{service}: {health.get(service, 'unknown')}")
 
     # Main content
     st.title("💬 Ask About Bank Complaints")
@@ -201,7 +215,7 @@ def main():
                     "role": "assistant",
                     "content": answer,
                     "question": question,
-                    "route": route
+                    "route": route,
                 }
 
                 # Handle SQL results
@@ -227,13 +241,15 @@ def main():
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Questions", len([m for m in st.session_state.messages if m["role"] == "user"]))
+        st.metric(
+            "Total Questions", len([m for m in st.session_state.messages if m["role"] == "user"])
+        )
     with col2:
         if st.button("Clear History"):
             st.session_state.messages = []
             st.rerun()
     with col3:
-        st.markdown("[View on GitHub](https://github.com/your-repo)")
+        st.markdown(f"[View on GitHub]({REPO_URL})")
 
 
 if __name__ == "__main__":

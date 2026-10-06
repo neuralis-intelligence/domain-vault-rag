@@ -2,172 +2,154 @@
 LLM client for interacting with Ollama.
 
 Handles:
-- Connection to Ollama API
+- Connection to the Ollama HTTP API
 - Prompt formatting
-- Response parsing
-- Fallback to Groq API if configured
+- Answer synthesis from SQL / RAG results
 """
 
-import os
-import requests
-from typing import Optional, Dict, Any, List
 import logging
+from typing import Any
 
-logging.basicConfig(level=logging.INFO)
+import requests
+
+from app.config import settings
+from app.prompts.synthesis import get_synthesis_prompt
+
 logger = logging.getLogger(__name__)
+
+# Keep the synthesis context small enough for a 7B model's context window.
+MAX_SQL_ROWS_IN_CONTEXT = 50
+MAX_NARRATIVE_CHARS = 1000
 
 
 class OllamaClient:
-    """Client for interacting with Ollama LLM."""
+    """Client for interacting with an Ollama LLM."""
 
     def __init__(
         self,
-        host: str = None,
-        model: str = None,
-        temperature: float = 0.1,
-        max_tokens: int = 1000
+        host: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
     ):
-        self.host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+        self.host = (host or settings.ollama_host).rstrip("/")
+        self.model = model or settings.ollama_model
+        self.temperature = settings.llm_temperature if temperature is None else temperature
+        self.max_tokens = max_tokens or settings.llm_max_tokens
+        self.timeout = timeout or settings.llm_timeout_seconds
+
+    def _options(self, temperature: float | None, max_tokens: int | None) -> dict[str, Any]:
+        # `is None` checks so that an explicit temperature of 0.0 is respected.
+        return {
+            "temperature": self.temperature if temperature is None else temperature,
+            "num_predict": self.max_tokens if max_tokens is None else max_tokens,
+        }
 
     def generate(
         self,
         prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
-        """
-        Generate a response from Ollama.
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system prompt
-            temperature: Override default temperature
-            max_tokens: Override default max tokens
-
-        Returns:
-            Generated text response
-        """
-        url = f"{self.host}/api/generate"
-
-        payload = {
+        """Generate a single completion for `prompt`."""
+        payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "temperature": temperature or self.temperature,
-                "num_predict": max_tokens or self.max_tokens
-            }
+            "options": self._options(temperature, max_tokens),
         }
-
         if system_prompt:
             payload["system"] = system_prompt
 
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(
+                f"{self.host}/api/generate", json=payload, timeout=self.timeout
+            )
             response.raise_for_status()
-            result = response.json()
-            return result.get("response", "")
-
-        except Exception as e:
-            logger.error(f"Ollama generation failed: {e}")
+            return response.json().get("response", "")
+        except requests.RequestException as e:
+            logger.error("Ollama generation failed: %s", e)
             raise
 
     def chat(
         self,
-        messages: List[Dict[str, str]],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
-        """
-        Chat completion with conversation history.
-
-        Args:
-            messages: List of {"role": "user"|"assistant", "content": "..."}
-            temperature: Override default temperature
-            max_tokens: Override default max tokens
-
-        Returns:
-            Generated text response
-        """
-        url = f"{self.host}/api/chat"
-
+        """Chat completion over a list of {"role": ..., "content": ...} messages."""
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": temperature or self.temperature,
-                "num_predict": max_tokens or self.max_tokens
-            }
+            "options": self._options(temperature, max_tokens),
         }
 
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)
             response.raise_for_status()
-            result = response.json()
-            return result.get("message", {}).get("content", "")
-
-        except Exception as e:
-            logger.error(f"Ollama chat failed: {e}")
+            return response.json().get("message", {}).get("content", "")
+        except requests.RequestException as e:
+            logger.error("Ollama chat failed: %s", e)
             raise
 
+    def is_available(self) -> bool:
+        """Return True if the Ollama server responds."""
+        try:
+            return requests.get(f"{self.host}/api/tags", timeout=3).ok
+        except requests.RequestException:
+            return False
 
-# Singleton client
-_llm_client = None
+
+_llm_client: OllamaClient | None = None
 
 
 def get_llm_client() -> OllamaClient:
-    """Get or create the LLM client."""
+    """Get or create the shared LLM client."""
     global _llm_client
     if _llm_client is None:
         _llm_client = OllamaClient()
     return _llm_client
 
 
-def synthesize_answer(
-    question: str,
-    sql_result: Optional[Dict[str, Any]] = None,
-    rag_result: Optional[Dict[str, Any]] = None,
-    route: str = "unknown"
+def build_context(
+    sql_result: dict[str, Any] | None = None,
+    rag_result: dict[str, Any] | None = None,
 ) -> str:
-    """
-    Synthesize a final answer from SQL and/or RAG results.
-
-    Args:
-        question: Original user question
-        sql_result: Results from BigQuery (if sql/hybrid route)
-        rag_result: Results from Qdrant (if rag/hybrid route)
-        route: Which route was taken
-
-    Returns:
-        Natural language answer
-    """
-    client = get_llm_client()
-
-    # Build context from results
-    context_parts = []
+    """Format SQL rows and RAG narratives into a plain-text context block."""
+    parts: list[str] = []
 
     if sql_result:
-        context_parts.append("SQL Query Results:")
-        context_parts.append(str(sql_result))
+        if sql_result.get("error"):
+            parts.append(f"SQL query failed: {sql_result['error']}")
+        else:
+            rows = sql_result.get("results", [])
+            parts.append(f"SQL query: {sql_result.get('sql', '')}")
+            parts.append(f"SQL results ({len(rows)} rows):")
+            parts.extend(str(row) for row in rows[:MAX_SQL_ROWS_IN_CONTEXT])
 
     if rag_result:
-        context_parts.append("\nRelevant Complaint Narratives:")
-        for doc in rag_result.get("documents", []):
-            context_parts.append(f"- {doc.get('narrative', '')}")
+        documents = rag_result.get("documents", [])
+        parts.append(f"\nRelevant complaint narratives ({len(documents)}):")
+        for doc in documents:
+            narrative = (doc.get("narrative") or "")[:MAX_NARRATIVE_CHARS]
+            parts.append(
+                f"- [Complaint {doc.get('complaint_id')}] {doc.get('company')} / "
+                f"{doc.get('issue')}: {narrative}"
+            )
 
-    context = "\n".join(context_parts)
+    return "\n".join(parts) if parts else "No data was retrieved."
 
-    # Load synthesis prompt
-    from app.prompts.synthesis import get_synthesis_prompt
 
+def synthesize_answer(
+    question: str,
+    sql_result: dict[str, Any] | None = None,
+    rag_result: dict[str, Any] | None = None,
+    route: str = "unknown",
+) -> str:
+    """Synthesize a natural-language answer from SQL and/or RAG results."""
+    context = build_context(sql_result, rag_result)
     prompt = get_synthesis_prompt(question, context, route)
-
-    # Generate answer
-    answer = client.generate(prompt)
-
-    return answer
+    return get_llm_client().generate(prompt)

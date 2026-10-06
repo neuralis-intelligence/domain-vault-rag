@@ -1,5 +1,30 @@
+# Virtual environments
 .myvenv/
 .venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
 .ipynb_checkpoints/
-# Raw CFPB data
-banking-qa-agent/data/raw/**/*.csv
+
+# Secrets
+.env
+credentials/
+
+# Data (large / regenerable) - keep the folder skeleton only
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Evaluation output
+eval/eval_results.csv
+
+# OS
+.DS_Store

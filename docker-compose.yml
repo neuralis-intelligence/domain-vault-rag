@@ -1,7 +1,9 @@
-version: '3.8'
+# Local development:   docker compose up -d qdrant        (run API/UI/Ollama natively)
+# Full stack:          docker compose --profile app up -d --build
+# Ollama in Docker:    add --profile ollama and set OLLAMA_HOST_DOCKER=http://ollama:11434
+#   (on macOS prefer native Ollama: Docker cannot use the Apple GPU)
 
 services:
-  # Qdrant vector database
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
@@ -10,63 +12,55 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT__SERVICE__GRPC_PORT=6334
     restart: unless-stopped
 
-  # Ollama LLM service
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    profiles: ["ollama"]
     ports:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    # If no GPU, comment out the deploy section above
+    # NVIDIA GPU (Linux only):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
-  # FastAPI backend
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: complaint_insights_api
+    profiles: ["app"]
     ports:
       - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - OLLAMA_HOST=http://ollama:11434
-      - BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID}
+      - OLLAMA_HOST=${OLLAMA_HOST_DOCKER:-http://host.docker.internal:11434}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/bigquery-key.json
     volumes:
-      - ./app:/app/app
-      - ./credentials:/app/credentials
+      - ./credentials:/app/credentials:ro
     depends_on:
       - qdrant
-      - ollama
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-  # Streamlit UI
   ui:
-    build:
-      context: .
-      dockerfile: Dockerfile.ui
+    build: .
     container_name: complaint_insights_ui
+    profiles: ["app"]
     ports:
       - "8501:8501"
     environment:
       - API_URL=http://api:8000
-    volumes:
-      - ./ui:/app/ui
     depends_on:
       - api
     restart: unless-stopped
@@ -74,6 +68,4 @@ services:
 
 volumes:
   qdrant_storage:
-    driver: local
   ollama_models:
-    driver: local

@@ -9,13 +9,14 @@ Measures:
 """
 
 import json
-import requests
-import time
-from pathlib import Path
-from typing import Dict, List, Any
-import pandas as pd
-from collections import defaultdict
 import logging
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,28 +29,26 @@ class EvaluationRunner:
         self.api_url = api_url
         self.results = []
 
-    def load_questions(self, filepath: str = None) -> List[Dict[str, Any]]:
+    def load_questions(self, filepath: str = None) -> list[dict[str, Any]]:
         """Load test questions from JSONL file."""
         if filepath is None:
             filepath = Path(__file__).parent / "questions.jsonl"
 
         questions = []
-        with open(filepath, 'r') as f:
+        with open(filepath) as f:
             for line in f:
                 questions.append(json.loads(line))
 
         logger.info(f"Loaded {len(questions)} test questions")
         return questions
 
-    def query_api(self, question: str) -> Dict[str, Any]:
+    def query_api(self, question: str) -> dict[str, Any]:
         """Send question to API and measure latency."""
         start_time = time.time()
 
         try:
             response = requests.post(
-                f"{self.api_url}/ask",
-                json={"question": question},
-                timeout=60
+                f"{self.api_url}/ask", json={"question": question}, timeout=180
             )
             response.raise_for_status()
             result = response.json()
@@ -61,7 +60,7 @@ class EvaluationRunner:
                 "route": result.get("route", "unknown"),
                 "metadata": result.get("metadata", {}),
                 "latency": latency,
-                "error": None
+                "error": None,
             }
 
         except Exception as e:
@@ -73,14 +72,14 @@ class EvaluationRunner:
                 "route": "unknown",
                 "metadata": {},
                 "latency": latency,
-                "error": str(e)
+                "error": str(e),
             }
 
     def evaluate_routing(self, predicted: str, expected: str) -> bool:
         """Check if route matches expectation."""
         return predicted.lower() == expected.lower()
 
-    def evaluate_answer(self, answer: str, expected_contains: List[str]) -> Dict[str, Any]:
+    def evaluate_answer(self, answer: str, expected_contains: list[str]) -> dict[str, Any]:
         """
         Check if answer contains expected content.
 
@@ -93,10 +92,10 @@ class EvaluationRunner:
         return {
             "matches": matches,
             "total": len(expected_contains),
-            "match_rate": matches / len(expected_contains) if expected_contains else 0
+            "match_rate": matches / len(expected_contains) if expected_contains else 0,
         }
 
-    def run_evaluation(self, questions: List[Dict[str, Any]]) -> pd.DataFrame:
+    def run_evaluation(self, questions: list[dict[str, Any]]) -> pd.DataFrame:
         """
         Run evaluation on all questions.
 
@@ -112,32 +111,32 @@ class EvaluationRunner:
 
             # Evaluate routing
             routing_correct = self.evaluate_routing(
-                result["route"],
-                q.get("expected_route", "unknown")
+                result["route"], q.get("expected_route", "unknown")
             )
 
             # Evaluate answer quality
             answer_eval = self.evaluate_answer(
-                result["answer"],
-                q.get("expected_answer_contains", [])
+                result["answer"], q.get("expected_answer_contains", [])
             )
 
             # Store result
-            self.results.append({
-                "question": q["question"],
-                "expected_route": q.get("expected_route", "unknown"),
-                "actual_route": result["route"],
-                "routing_correct": routing_correct,
-                "answer": result["answer"],
-                "answer_match_rate": answer_eval["match_rate"],
-                "latency": result["latency"],
-                "success": result["success"],
-                "error": result["error"]
-            })
+            self.results.append(
+                {
+                    "question": q["question"],
+                    "expected_route": q.get("expected_route", "unknown"),
+                    "actual_route": result["route"],
+                    "routing_correct": routing_correct,
+                    "answer": result["answer"],
+                    "answer_match_rate": answer_eval["match_rate"],
+                    "latency": result["latency"],
+                    "success": result["success"],
+                    "error": result["error"],
+                }
+            )
 
         return pd.DataFrame(self.results)
 
-    def compute_metrics(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def compute_metrics(self, df: pd.DataFrame) -> dict[str, Any]:
         """Compute aggregate metrics."""
         metrics = {
             "total_questions": len(df),
@@ -157,20 +156,20 @@ class EvaluationRunner:
                 "count": len(route_df),
                 "routing_accuracy": route_df["routing_correct"].mean(),
                 "answer_quality": route_df["answer_match_rate"].mean(),
-                "avg_latency": route_df["latency"].mean()
+                "avg_latency": route_df["latency"].mean(),
             }
 
         metrics["route_breakdown"] = dict(route_breakdown)
 
         return metrics
 
-    def print_report(self, metrics: Dict[str, Any]):
+    def print_report(self, metrics: dict[str, Any]):
         """Print evaluation report."""
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("EVALUATION REPORT")
-        print("="*60)
+        print("=" * 60)
 
-        print(f"\nOverall Metrics:")
+        print("\nOverall Metrics:")
         print(f"  Total Questions:    {metrics['total_questions']}")
         print(f"  Success Rate:       {metrics['success_rate']:.1%}")
         print(f"  Routing Accuracy:   {metrics['routing_accuracy']:.1%}")
@@ -179,15 +178,15 @@ class EvaluationRunner:
         print(f"  Median Latency:     {metrics['median_latency']:.2f}s")
         print(f"  Error Rate:         {metrics['error_rate']:.1%}")
 
-        print(f"\nBreakdown by Route:")
-        for route, stats in metrics['route_breakdown'].items():
+        print("\nBreakdown by Route:")
+        for route, stats in metrics["route_breakdown"].items():
             print(f"\n  {route.upper()}:")
             print(f"    Questions:        {stats['count']}")
             print(f"    Routing Accuracy: {stats['routing_accuracy']:.1%}")
             print(f"    Answer Quality:   {stats['answer_quality']:.1%}")
             print(f"    Avg Latency:      {stats['avg_latency']:.2f}s")
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
 
     def save_results(self, df: pd.DataFrame, output_path: str = None):
         """Save detailed results to CSV."""

@@ -1,0 +1,11 @@
+.git
+.myvenv
+.venv
+**/__pycache__
+**/.ipynb_checkpoints
+.pytest_cache
+.ruff_cache
+data
+notebooks
+credentials
+.env

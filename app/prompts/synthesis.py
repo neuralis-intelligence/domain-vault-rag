@@ -8,10 +8,12 @@ def get_synthesis_prompt(question: str, context: str, route: str) -> str:
     route_instructions = {
         "sql": "Use the SQL query results to provide a clear, concise answer with specific numbers.",
         "rag": "Synthesize information from the complaint narratives, citing complaint IDs when relevant.",
-        "hybrid": "Combine the statistical insights from SQL with specific examples from the narratives."
+        "hybrid": "Combine the statistical insights from SQL with specific examples from the narratives.",
     }
 
-    instruction = route_instructions.get(route, "Provide a clear answer based on the available data.")
+    instruction = route_instructions.get(
+        route, "Provide a clear answer based on the available data."
+    )
 
     return f"""You are an AI assistant helping users understand CFPB bank complaint data.
 

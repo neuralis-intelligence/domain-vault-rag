@@ -1,114 +1,119 @@
 """
-FastAPI backend for Complaint Insights Agent.
+FastAPI backend for the Complaint Insights Agent.
 
-Provides:
-- POST /ask endpoint for natural language queries
-- Query routing between SQL, RAG, and hybrid approaches
-- Response synthesis using local LLM
+Endpoints:
+- GET  /         service info
+- GET  /health   connectivity to Ollama, Qdrant and BigQuery
+- POST /ask      answer a natural-language question (routes sql/rag/hybrid)
+- POST /feedback record user feedback on an answer
 """
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
 import logging
+from contextlib import asynccontextmanager
+from typing import Any
 
-from app.graph import ComplaintInsightsGraph
+import requests
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from app import __version__
+from app.config import settings
+from app.graph import ComplaintInsightsGraph, get_graph
 from app.llm import get_llm_client
+from app.rag_tool import get_rag_tool
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    logger.info("Starting Complaint Insights API v%s", __version__)
+    yield
+
 
 app = FastAPI(
     title="Complaint Insights API",
     description="Answer natural language questions about CFPB bank complaints",
-    version="1.0.0"
+    version=__version__,
+    lifespan=lifespan,
 )
 
 
 class QueryRequest(BaseModel):
-    question: str
-    context: Optional[Dict[str, Any]] = None
+    question: str = Field(..., min_length=1, max_length=1000)
+    context: dict[str, Any] | None = None
 
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
     route: str  # "sql", "rag", or "hybrid"
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup."""
-    logger.info("Starting Complaint Insights API...")
-    # TODO: Initialize LangGraph, LLM, BigQuery, and Qdrant clients
-    # global graph
-    # graph = ComplaintInsightsGraph()
-    logger.info("API ready to serve requests")
+class FeedbackRequest(BaseModel):
+    question: str
+    answer: str
+    rating: int = Field(..., ge=1, le=5)
+    comments: str | None = None
 
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
-    return {
-        "service": "Complaint Insights API",
-        "status": "operational",
-        "version": "1.0.0"
-    }
+    """Service info."""
+    return {"service": "Complaint Insights API", "status": "operational", "version": __version__}
 
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check."""
-    # TODO: Check connectivity to Ollama, Qdrant, BigQuery
-    return {
-        "status": "healthy",
-        "ollama": "connected",
-        "qdrant": "connected",
-        "bigquery": "connected"
+    """Report connectivity to each backing service."""
+    checks = {
+        "ollama": "connected" if get_llm_client().is_available() else "unavailable",
+        "qdrant": "connected" if get_rag_tool().is_available() else "unavailable",
+        "bigquery": "configured" if settings.bigquery_project_id else "not configured",
     }
+    healthy = checks["ollama"] == "connected" and checks["qdrant"] == "connected"
+    return {"status": "healthy" if healthy else "degraded", **checks}
 
 
 @app.post("/ask", response_model=QueryResponse)
-async def ask_question(request: QueryRequest):
-    """
-    Process a natural language question about CFPB complaints.
-
-    The system will:
-    1. Route the question to SQL, RAG, or hybrid approach
-    2. Execute the appropriate retrieval strategy
-    3. Synthesize an answer using the local LLM
-    4. Return the answer with metadata
-    """
+async def ask_question(
+    request: QueryRequest,
+    graph: ComplaintInsightsGraph = Depends(get_graph),
+):
+    """Route the question, retrieve data, and synthesize an answer."""
+    logger.info("Received question: %s", request.question)
     try:
-        logger.info(f"Received question: {request.question}")
-
-        # TODO: Implement LangGraph workflow
-        # result = await graph.run(request.question, context=request.context)
-
-        # Placeholder response
-        return QueryResponse(
-            question=request.question,
-            answer="This endpoint is under development. Coming soon!",
-            route="unknown",
-            metadata={}
-        )
-
+        result = await graph.run(request.question, context=request.context)
+    except requests.ConnectionError as e:
+        logger.error("Ollama unreachable at %s: %s", settings.ollama_host, e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM service unreachable at {settings.ollama_host}. Is Ollama running?",
+        ) from e
     except Exception as e:
-        logger.error(f"Error processing question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error processing question")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return QueryResponse(
+        question=request.question,
+        answer=result["answer"],
+        route=result["route"],
+        metadata=result["metadata"],
+    )
 
 
 @app.post("/feedback")
-async def submit_feedback(question: str, answer: str, rating: int, comments: Optional[str] = None):
-    """
-    Submit feedback on query responses for continuous improvement.
-    """
-    # TODO: Log feedback for analysis
-    logger.info(f"Feedback received: rating={rating}, question={question[:50]}...")
+async def submit_feedback(feedback: FeedbackRequest):
+    """Record feedback on a response (logged for now)."""
+    logger.info(
+        "Feedback received: rating=%d, question=%s", feedback.rating, feedback.question[:50]
+    )
     return {"status": "feedback recorded", "thank_you": True}
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

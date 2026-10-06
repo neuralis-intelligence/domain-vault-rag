@@ -1,170 +1,167 @@
 """
 LangGraph workflow for routing and orchestrating SQL/RAG/hybrid queries.
 
-This module implements the agent logic:
-1. Router: Classify query as sql/rag/hybrid
-2. SQL Tool: Execute text-to-SQL on BigQuery
-3. RAG Tool: Semantic search on Qdrant
-4. Hybrid: Combine SQL (filter) + RAG (narratives)
-5. Synthesis: Generate final answer with LLM
+1. Router: classify the query as sql/rag/hybrid
+2. SQL tool: text-to-SQL on BigQuery
+3. RAG tool: semantic search on Qdrant
+4. Hybrid: SQL first, then RAG filtered by the SQL result
+5. Synthesis: generate the final answer with the LLM
 """
 
-from typing import TypedDict, Literal, Optional, Dict, Any
-from langgraph.graph import StateGraph, END
 import logging
+import re
+from typing import Any, Literal, TypedDict
 
+from langgraph.graph import END, StateGraph
+
+from app.llm import synthesize_answer
+from app.rag_tool import FILTERABLE_FIELDS, execute_rag_query
 from app.router import route_query
 from app.sql_tool import execute_sql_query
-from app.rag_tool import execute_rag_query
-from app.llm import synthesize_answer
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+RouteType = Literal["sql", "rag", "hybrid"]
 
 
 class GraphState(TypedDict):
     """State passed through the LangGraph workflow."""
+
     question: str
-    route: Literal["sql", "rag", "hybrid"]
-    sql_result: Optional[Dict[str, Any]]
-    rag_result: Optional[Dict[str, Any]]
+    route: RouteType
+    sql_result: dict[str, Any] | None
+    rag_result: dict[str, Any] | None
     answer: str
-    metadata: Dict[str, Any]
+    metadata: dict[str, Any]
+
+
+def filters_from_sql_result(sql_result: dict[str, Any]) -> dict[str, str]:
+    """
+    Derive RAG metadata filters from a SQL result.
+
+    Uses exact-match conditions in the SQL (e.g. company = 'WELLS FARGO & COMPANY')
+    and, where present, filterable columns in the top result row (e.g. the top issue).
+    """
+    if not sql_result or sql_result.get("error"):
+        return {}
+
+    filters: dict[str, str] = {}
+    for field, value in re.findall(r"\b(\w+)\s*=\s*'([^']*)'", sql_result.get("sql", "")):
+        if field.lower() in FILTERABLE_FIELDS:
+            filters[field.lower()] = value
+
+    rows = sql_result.get("results") or []
+    if rows:
+        for field in FILTERABLE_FIELDS:
+            value = rows[0].get(field)
+            if isinstance(value, str) and value:
+                filters[field] = value
+
+    return filters
+
+
+def route_node(state: GraphState) -> dict[str, Any]:
+    """Route the query to sql/rag/hybrid."""
+    route = route_query(state["question"])
+    logger.info("Route selected: %s", route)
+    return {"route": route, "metadata": {**state["metadata"], "route": route}}
+
+
+def sql_node(state: GraphState) -> dict[str, Any]:
+    """Execute the SQL path."""
+    return {"sql_result": execute_sql_query(state["question"])}
+
+
+def rag_node(state: GraphState) -> dict[str, Any]:
+    """Execute the RAG path."""
+    return {"rag_result": execute_rag_query(state["question"])}
+
+
+def hybrid_node(state: GraphState) -> dict[str, Any]:
+    """Execute SQL, then RAG filtered by what SQL found."""
+    sql_result = execute_sql_query(state["question"])
+    filters = filters_from_sql_result(sql_result)
+    logger.info("Hybrid RAG filters: %s", filters)
+
+    rag_result = execute_rag_query(state["question"], filters=filters or None)
+    if filters and not rag_result.get("documents"):
+        logger.info("No narratives matched the SQL filters; retrying unfiltered")
+        rag_result = execute_rag_query(state["question"])
+
+    return {"sql_result": sql_result, "rag_result": rag_result}
+
+
+def synthesize_node(state: GraphState) -> dict[str, Any]:
+    """Synthesize the final answer using the LLM."""
+    answer = synthesize_answer(
+        question=state["question"],
+        sql_result=state.get("sql_result"),
+        rag_result=state.get("rag_result"),
+        route=state["route"],
+    )
+    return {"answer": answer}
+
+
+def build_graph():
+    """Construct and compile the LangGraph workflow."""
+    workflow = StateGraph(GraphState)
+
+    workflow.add_node("route", route_node)
+    workflow.add_node("sql", sql_node)
+    workflow.add_node("rag", rag_node)
+    workflow.add_node("hybrid", hybrid_node)
+    workflow.add_node("synthesize", synthesize_node)
+
+    workflow.set_entry_point("route")
+    workflow.add_conditional_edges(
+        "route",
+        lambda state: state["route"],
+        {"sql": "sql", "rag": "rag", "hybrid": "hybrid"},
+    )
+    for node in ("sql", "rag", "hybrid"):
+        workflow.add_edge(node, "synthesize")
+    workflow.add_edge("synthesize", END)
+
+    return workflow.compile()
 
 
 class ComplaintInsightsGraph:
-    """
-    LangGraph workflow for complaint insights queries.
-    """
+    """Thin wrapper around the compiled LangGraph workflow."""
 
     def __init__(self):
-        self.graph = self._build_graph()
+        self.graph = build_graph()
 
-    def _build_graph(self) -> StateGraph:
-        """Construct the LangGraph workflow."""
-        workflow = StateGraph(GraphState)
-
-        # Add nodes
-        workflow.add_node("route", self._route_node)
-        workflow.add_node("sql", self._sql_node)
-        workflow.add_node("rag", self._rag_node)
-        workflow.add_node("hybrid", self._hybrid_node)
-        workflow.add_node("synthesize", self._synthesize_node)
-
-        # Define edges
-        workflow.set_entry_point("route")
-
-        # Conditional routing based on query classification
-        workflow.add_conditional_edges(
-            "route",
-            lambda state: state["route"],
-            {
-                "sql": "sql",
-                "rag": "rag",
-                "hybrid": "hybrid"
-            }
-        )
-
-        # All paths lead to synthesis
-        workflow.add_edge("sql", "synthesize")
-        workflow.add_edge("rag", "synthesize")
-        workflow.add_edge("hybrid", "synthesize")
-
-        # End after synthesis
-        workflow.add_edge("synthesize", END)
-
-        return workflow.compile()
-
-    def _route_node(self, state: GraphState) -> GraphState:
-        """Route the query to sql/rag/hybrid."""
-        logger.info(f"Routing query: {state['question']}")
-        route = route_query(state["question"])
-        state["route"] = route
-        state["metadata"]["route"] = route
-        logger.info(f"Route selected: {route}")
-        return state
-
-    def _sql_node(self, state: GraphState) -> GraphState:
-        """Execute SQL query on BigQuery."""
-        logger.info("Executing SQL path")
-        sql_result = execute_sql_query(state["question"])
-        state["sql_result"] = sql_result
-        return state
-
-    def _rag_node(self, state: GraphState) -> GraphState:
-        """Execute RAG query on Qdrant."""
-        logger.info("Executing RAG path")
-        rag_result = execute_rag_query(state["question"])
-        state["rag_result"] = rag_result
-        return state
-
-    def _hybrid_node(self, state: GraphState) -> GraphState:
-        """Execute hybrid SQL + RAG query."""
-        logger.info("Executing hybrid path")
-
-        # First, get SQL results for filtering
-        sql_result = execute_sql_query(state["question"])
-        state["sql_result"] = sql_result
-
-        # Then, use SQL results to filter RAG search
-        rag_result = execute_rag_query(
-            state["question"],
-            filters=sql_result.get("filters", {})
-        )
-        state["rag_result"] = rag_result
-
-        return state
-
-    def _synthesize_node(self, state: GraphState) -> GraphState:
-        """Synthesize final answer using LLM."""
-        logger.info("Synthesizing answer")
-
-        answer = synthesize_answer(
-            question=state["question"],
-            sql_result=state.get("sql_result"),
-            rag_result=state.get("rag_result"),
-            route=state["route"]
-        )
-
-        state["answer"] = answer
-        return state
-
-    async def run(self, question: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Execute the full graph workflow.
-
-        Args:
-            question: Natural language query
-            context: Optional context for the query
-
-        Returns:
-            Dict with answer, route, and metadata
-        """
+    async def run(self, question: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run the full workflow and return the answer, route, and retrieved data."""
         initial_state = GraphState(
             question=question,
-            route="sql",  # Will be set by router
+            route="sql",  # overwritten by the router
             sql_result=None,
             rag_result=None,
             answer="",
-            metadata=context or {}
+            metadata=dict(context or {}),
         )
 
-        # Run the graph
         final_state = await self.graph.ainvoke(initial_state)
+
+        metadata = dict(final_state["metadata"])
+        if final_state.get("sql_result") is not None:
+            metadata["sql_result"] = final_state["sql_result"]
+        if final_state.get("rag_result") is not None:
+            metadata["rag_result"] = final_state["rag_result"]
 
         return {
             "answer": final_state["answer"],
             "route": final_state["route"],
-            "metadata": final_state["metadata"]
+            "metadata": metadata,
         }
 
 
-# Singleton instance
-_graph_instance = None
+_graph_instance: ComplaintInsightsGraph | None = None
 
 
 def get_graph() -> ComplaintInsightsGraph:
-    """Get or create the graph instance."""
+    """Get or create the shared graph instance."""
     global _graph_instance
     if _graph_instance is None:
         _graph_instance = ComplaintInsightsGraph()
