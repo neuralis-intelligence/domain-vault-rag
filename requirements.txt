@@ -1,9 +1,24 @@
-certifi==2026.7.22
-charset-normalizer==3.5.0
-idna==3.18
-numpy==2.5.2
-pandas==3.0.5
-python-dateutil==2.9.0.post0
+# Runtime dependencies (API, UI, ingestion)
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+langgraph==1.2.13
 requests==2.34.2
-six==1.17.0
-urllib3==2.7.0
+python-dotenv==1.2.4
+
+# Data
+pandas==3.0.5
+pyarrow==25.0.1
+tqdm==4.70.1
+
+# BigQuery (SQL path)
+google-cloud-bigquery==3.46.1
+db-dtypes==1.7.2
+
+# Vector search (RAG path)
+qdrant-client==1.19.1
+sentence-transformers==6.1.0
+
+# UI
+streamlit==1.65.0
+plotly==7.1.0
