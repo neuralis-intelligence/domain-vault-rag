@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 class EvaluationRunner:
     """Run evaluation suite on question set."""
 
-    def __init__(self, api_url: str = "http://localhost:8000"):
+    def __init__(self, api_url: str = "http://localhost:8000", model: str | None = None):
         self.api_url = api_url
+        self.model = model  # None = the API's default model
         self.results = []
 
     def load_questions(self, filepath: str = None) -> list[dict[str, Any]]:
@@ -42,13 +43,15 @@ class EvaluationRunner:
         logger.info(f"Loaded {len(questions)} test questions")
         return questions
 
-    def query_api(self, question: str) -> dict[str, Any]:
+    def query_api(self, question: str, lob: str | None = None) -> dict[str, Any]:
         """Send question to API and measure latency."""
         start_time = time.time()
 
         try:
             response = requests.post(
-                f"{self.api_url}/ask", json={"question": question}, timeout=180
+                f"{self.api_url}/ask",
+                json={"question": question, "lob": lob, "model": self.model},
+                timeout=180,
             )
             response.raise_for_status()
             result = response.json()
@@ -58,6 +61,7 @@ class EvaluationRunner:
                 "success": True,
                 "answer": result.get("answer", ""),
                 "route": result.get("route", "unknown"),
+                "model": result.get("model"),
                 "metadata": result.get("metadata", {}),
                 "latency": latency,
                 "error": None,
@@ -107,7 +111,7 @@ class EvaluationRunner:
         for i, q in enumerate(questions, 1):
             logger.info(f"Processing question {i}/{len(questions)}: {q['question'][:50]}...")
 
-            result = self.query_api(q["question"])
+            result = self.query_api(q["question"], q.get("lob"))
 
             # Evaluate routing
             routing_correct = self.evaluate_routing(
@@ -123,6 +127,8 @@ class EvaluationRunner:
             self.results.append(
                 {
                     "question": q["question"],
+                    "lob": q.get("lob"),
+                    "model": result.get("model") or self.model,
                     "expected_route": q.get("expected_route", "unknown"),
                     "actual_route": result["route"],
                     "routing_correct": routing_correct,
@@ -205,11 +211,12 @@ def main():
     parser.add_argument("--api-url", default="http://localhost:8000", help="API URL")
     parser.add_argument("--questions", default=None, help="Path to questions JSONL file")
     parser.add_argument("--output", default=None, help="Output CSV path")
+    parser.add_argument("--model", default=None, help="Model to evaluate (default: API default)")
 
     args = parser.parse_args()
 
     # Initialize evaluator
-    evaluator = EvaluationRunner(api_url=args.api_url)
+    evaluator = EvaluationRunner(api_url=args.api_url, model=args.model)
 
     # Load questions
     questions = evaluator.load_questions(args.questions)

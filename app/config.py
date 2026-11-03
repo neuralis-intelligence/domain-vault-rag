@@ -22,14 +22,18 @@ class Settings:
 
     # Relative paths are resolved against the project root.
     duckdb_path: Path = PROJECT_ROOT / os.getenv("DUCKDB_PATH", str(DEFAULT_DUCKDB_PATH))
-    sql_table: str = os.getenv("SQL_TABLE", "complaints")
+    lob_registry_path: Path = PROJECT_ROOT / os.getenv("LOB_REGISTRY_PATH", "config/lobs.toml")
 
     qdrant_host: str = os.getenv("QDRANT_HOST", "localhost")
     qdrant_port: int = int(os.getenv("QDRANT_PORT", "6333"))
-    qdrant_collection: str = os.getenv("QDRANT_COLLECTION_NAME", "complaint_narratives")
 
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+    ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")  # default model
+    # Models offered in the UI. Empty = every installed chat model up to MAX_MODEL_SIZE_GB.
+    allowed_models: tuple[str, ...] = tuple(
+        m.strip() for m in os.getenv("ALLOWED_MODELS", "").split(",") if m.strip()
+    )
+    max_model_size_gb: float = float(os.getenv("MAX_MODEL_SIZE_GB", "10"))
     llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "1000"))
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "120"))

@@ -1,9 +1,10 @@
 """
-RAG tool for semantic search on complaint narratives.
+RAG tool for semantic search over a line of business's embedded text.
 
 Implements:
 - Embedding generation for queries
-- Qdrant semantic search with metadata filters
+- Qdrant semantic search with metadata filters (each LOB has its own collection
+  and filter fields, see config/lobs.toml)
 - Result formatting with citations
 """
 
@@ -15,22 +16,19 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 from sentence_transformers import SentenceTransformer
 
 from app.config import settings
+from app.lob import LineOfBusiness, RagConfig, get_lob
 
 logger = logging.getLogger(__name__)
 
-# Payload fields that can be used as exact-match filters (indexed by embed_narratives.py).
-FILTERABLE_FIELDS = ("company", "product", "issue", "state")
-
 
 class RAGTool:
-    """Semantic search tool for complaint narratives."""
+    """Semantic search tool; one instance serves every LOB."""
 
     def __init__(
         self,
         embedding_model: str | None = None,
         qdrant_host: str | None = None,
         qdrant_port: int | None = None,
-        collection_name: str | None = None,
         top_k: int | None = None,
         score_threshold: float | None = None,
     ):
@@ -41,7 +39,6 @@ class RAGTool:
             host=qdrant_host or settings.qdrant_host,
             port=qdrant_port or settings.qdrant_port,
         )
-        self.collection_name = collection_name or settings.qdrant_collection
         self.top_k = top_k or settings.rag_top_k
         self.score_threshold = (
             settings.rag_score_threshold if score_threshold is None else score_threshold
@@ -62,36 +59,40 @@ class RAGTool:
         return embedding.tolist()
 
     @staticmethod
-    def build_filters(filters: dict[str, Any] | None = None) -> Filter | None:
+    def build_filters(rag: RagConfig, filters: dict[str, Any] | None = None) -> Filter | None:
         """
-        Build a Qdrant filter from metadata, e.g.
-        {"company": "JPMORGAN CHASE & CO.", "product": "Credit card", "state": "CA"}.
+        Build a Qdrant filter from the LOB's fixed filter plus request filters, e.g.
+        {"company": "JPMORGAN CHASE & CO.", "state": "CA"}.
 
-        Unknown fields and empty values are ignored.
+        Fields not in the LOB's `filter_fields` and empty values are ignored. The fixed
+        filter (e.g. product = 'Mortgage' in a shared collection) always applies.
         """
-        if not filters:
-            return None
-
+        merged = {
+            field: value
+            for field, value in (filters or {}).items()
+            if field in rag.filter_fields and value
+        }
+        merged.update(rag.fixed_filter)
         conditions = [
             FieldCondition(key=field, match=MatchValue(value=value))
-            for field, value in filters.items()
-            if field in FILTERABLE_FIELDS and value
+            for field, value in merged.items()
         ]
         return Filter(must=conditions) if conditions else None
 
     def search(
         self,
         query: str,
+        rag: RagConfig,
         filters: dict[str, Any] | None = None,
         top_k: int | None = None,
         score_threshold: float | None = None,
     ) -> dict[str, Any]:
-        """Semantic search over complaint narratives, optionally filtered by metadata."""
+        """Semantic search over the LOB's collection, optionally filtered by metadata."""
         try:
             response = self.qdrant_client.query_points(
-                collection_name=self.collection_name,
+                collection_name=rag.collection,
                 query=self.embed_query(query),
-                query_filter=self.build_filters(filters),
+                query_filter=self.build_filters(rag, filters),
                 limit=top_k or self.top_k,
                 score_threshold=self.score_threshold
                 if score_threshold is None
@@ -101,13 +102,9 @@ class RAGTool:
 
             documents = [
                 {
-                    "complaint_id": point.payload.get("complaint_id"),
-                    "narrative": point.payload.get("narrative"),
-                    "company": point.payload.get("company"),
-                    "product": point.payload.get("product"),
-                    "issue": point.payload.get("issue"),
-                    "state": point.payload.get("state"),
-                    "date_received": point.payload.get("date_received"),
+                    "id": point.payload.get(rag.id_column),
+                    "text": point.payload.get(rag.text_key),
+                    "fields": {f: point.payload.get(f) for f in rag.payload_fields},
                     "score": point.score,
                 }
                 for point in response.points
@@ -124,9 +121,17 @@ class RAGTool:
             return {"error": str(e), "query": query, "documents": [], "count": 0}
 
     def is_available(self) -> bool:
-        """Return True if Qdrant is reachable and the collection exists."""
+        """Return True if Qdrant is reachable."""
         try:
-            return self.qdrant_client.collection_exists(self.collection_name)
+            self.qdrant_client.get_collections()
+            return True
+        except Exception:
+            return False
+
+    def collection_exists(self, collection: str) -> bool:
+        """Return True if Qdrant is reachable and `collection` exists."""
+        try:
+            return self.qdrant_client.collection_exists(collection)
         except Exception:
             return False
 
@@ -142,8 +147,15 @@ def get_rag_tool() -> RAGTool:
     return _rag_tool
 
 
-def execute_rag_query(question: str, filters: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Run semantic search for `question` with optional metadata filters."""
-    results = get_rag_tool().search(question, filters=filters)
+def execute_rag_query(
+    question: str,
+    lob: LineOfBusiness | None = None,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run semantic search for `question` in the LOB's collection, with optional filters."""
+    lob = lob or get_lob()
+    if lob.rag is None:
+        return {"error": f"'{lob.name}' has no text search configured", "documents": [], "count": 0}
+    results = get_rag_tool().search(question, lob.rag, filters=filters)
     logger.info("RAG search returned %d results", results.get("count", 0))
     return results

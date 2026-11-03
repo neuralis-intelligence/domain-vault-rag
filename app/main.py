@@ -4,7 +4,9 @@ FastAPI backend for the Complaint Insights Agent.
 Endpoints:
 - GET  /         service info
 - GET  /health   connectivity to Ollama, Qdrant and DuckDB
-- POST /ask      answer a natural-language question (routes sql/rag/hybrid)
+- GET  /models   installed local models the user can choose from
+- GET  /lobs     lines of business the user can ask about, and whether their data is loaded
+- POST /ask      answer a question about one LOB with one model (routes sql/rag/hybrid)
 - POST /feedback record user feedback on an answer
 """
 
@@ -19,7 +21,8 @@ from pydantic import BaseModel, Field
 from app import __version__
 from app.config import settings
 from app.graph import ComplaintInsightsGraph, get_graph
-from app.llm import get_llm_client
+from app.llm import ModelNotAvailableError, get_llm_client, list_models, resolve_model
+from app.lob import UnknownLOBError, get_registry
 from app.rag_tool import get_rag_tool
 from app.sql_tool import get_sql_tool
 
@@ -43,6 +46,12 @@ app = FastAPI(
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
+    lob: str | None = Field(
+        None, description="Line of business id from GET /lobs (default LOB if omitted)"
+    )
+    model: str | None = Field(
+        None, description="Model name from GET /models (OLLAMA_MODEL if omitted)"
+    )
     context: dict[str, Any] | None = None
 
 
@@ -50,6 +59,8 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     route: str  # "sql", "rag", or "hybrid"
+    lob: str
+    model: str
     metadata: dict[str, Any] | None = None
 
 
@@ -78,15 +89,64 @@ async def health_check():
     return {"status": "healthy" if healthy else "degraded", **checks}
 
 
+@app.get("/models")
+async def get_models():
+    """Installed local models the user can pick (smallest first) and the default one."""
+    try:
+        models = list_models()
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM service unreachable at {settings.ollama_host}. Is Ollama running?",
+        ) from e
+    return {"default": settings.ollama_model, "models": models}
+
+
+@app.get("/lobs")
+async def get_lobs():
+    """Lines of business from config/lobs.toml, with how many rows each has loaded."""
+    registry = get_registry()
+    sql_tool, rag_tool = get_sql_tool(), get_rag_tool()
+    lobs = []
+    for lob in registry.lobs.values():
+        rows = sql_tool.row_count(lob.table)
+        lobs.append(
+            {
+                "id": lob.id,
+                "name": lob.name,
+                "description": lob.description,
+                "rows": rows or 0,
+                "sql_available": bool(rows),
+                "rag_available": bool(lob.rag) and rag_tool.collection_exists(lob.rag.collection),
+                "example_questions": list(lob.example_questions),
+            }
+        )
+    return {"default": registry.default, "lobs": lobs}
+
+
 @app.post("/ask", response_model=QueryResponse)
 async def ask_question(
     request: QueryRequest,
     graph: ComplaintInsightsGraph = Depends(get_graph),
 ):
-    """Route the question, retrieve data, and synthesize an answer."""
-    logger.info("Received question: %s", request.question)
+    """Route the question, retrieve data from the chosen LOB, and answer with the chosen model."""
     try:
-        result = await graph.run(request.question, context=request.context)
+        lob = get_registry().get(request.lob)
+    except UnknownLOBError as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0])) from e
+    try:
+        model = resolve_model(request.model)
+    except ModelNotAvailableError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM service unreachable at {settings.ollama_host}. Is Ollama running?",
+        ) from e
+
+    logger.info("Received question (lob=%s, model=%s): %s", lob.id, model, request.question)
+    try:
+        result = await graph.run(request.question, lob=lob, model=model, context=request.context)
     except requests.ConnectionError as e:
         logger.error("Ollama unreachable at %s: %s", settings.ollama_host, e)
         raise HTTPException(
@@ -101,6 +161,8 @@ async def ask_question(
         question=request.question,
         answer=result["answer"],
         route=result["route"],
+        lob=lob.id,
+        model=model,
         metadata=result["metadata"],
     )
 

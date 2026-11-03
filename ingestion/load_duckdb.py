@@ -1,9 +1,9 @@
 """
-DuckDB loader for cleaned CFPB complaint data.
+Build the DuckDB database: one table per line of business in config/lobs.toml.
 
-- Reads data/processed/complaints.parquet (output of clean.py)
-- Builds the `complaints` table with an explicit schema
-- Creates and fills the `company_aliases` lookup table
+- Each LOB's table is created from its `source` Parquet file (optionally filtered by `where`)
+- LOBs whose source file doesn't exist yet are skipped with a warning
+- The `company_aliases` lookup table is created for the CFPB data
 
 The database is built in a temporary file and then swapped into place, so a running
 API keeps answering from the old copy. Restart the API to pick up the new data.
@@ -12,35 +12,17 @@ Usage (from the project root):
     python -m ingestion.load_duckdb
 """
 
+import glob
 import logging
 import os
 from pathlib import Path
 
 import duckdb
 
-from app.config import CLEANED_COMPLAINTS_PATH, settings
+from app.config import settings
+from app.lob import LineOfBusiness, Registry, get_registry
 
 logger = logging.getLogger(__name__)
-
-# Column -> DuckDB type. Order and names must match FINAL_COLUMNS in clean.py.
-COMPLAINTS_SCHEMA = {
-    "complaint_id": "VARCHAR NOT NULL",
-    "date_received": "DATE NOT NULL",
-    "date_sent_to_company": "DATE",
-    "product": "VARCHAR",
-    "sub_product": "VARCHAR",
-    "issue": "VARCHAR",
-    "sub_issue": "VARCHAR",
-    "consumer_complaint_narrative": "VARCHAR",
-    "company": "VARCHAR",
-    "state": "VARCHAR",
-    "zip_code": "VARCHAR",
-    "submitted_via": "VARCHAR",
-    "company_response": "VARCHAR",
-    "timely_response": "VARCHAR",
-    "company_public_response": "VARCHAR",
-    "tags": "VARCHAR",
-}
 
 ALIASES_TABLE = "company_aliases"
 
@@ -70,18 +52,25 @@ COMPANY_ALIASES = {
 }
 
 
-def load_complaints(con: duckdb.DuckDBPyConnection, table: str, parquet_path: Path) -> int:
-    """Create `table` from the cleaned Parquet file, casting each column to its schema type."""
-    columns = ",\n    ".join(f"{name} {dtype}" for name, dtype in COMPLAINTS_SCHEMA.items())
-    con.execute(f"CREATE OR REPLACE TABLE {table} (\n    {columns}\n)")
+def source_exists(lob: LineOfBusiness) -> bool:
+    """True if the LOB's source path (or glob) matches at least one file."""
+    return bool(glob.glob(str(lob.source)))
 
-    casts = ", ".join(
-        f"CAST({name} AS {dtype.split()[0]})" for name, dtype in COMPLAINTS_SCHEMA.items()
+
+def load_lob_table(con: duckdb.DuckDBPyConnection, lob: LineOfBusiness) -> int:
+    """Create the LOB's table from its source Parquet; returns the row count."""
+    where = f" WHERE {lob.where}" if lob.where else ""
+    con.execute(
+        f"CREATE OR REPLACE TABLE {lob.table} AS SELECT * FROM read_parquet(?){where}",
+        [str(lob.source)],
     )
-    con.execute(f"INSERT INTO {table} SELECT {casts} FROM read_parquet(?)", [str(parquet_path)])
-
-    (count,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-    logger.info("Loaded %d rows into %s", count, table)
+    (count,) = con.execute(f"SELECT COUNT(*) FROM {lob.table}").fetchone()
+    if count:
+        logger.info("%-18s %9d rows -> %s", lob.id, count, lob.table)
+    else:
+        logger.warning(
+            "%s: 0 rows in %s (check `where` / that the data was pulled)", lob.id, lob.table
+        )
     return count
 
 
@@ -95,26 +84,32 @@ def load_company_aliases(con: duckdb.DuckDBPyConnection) -> None:
     logger.info("Loaded %d aliases into %s", len(COMPANY_ALIASES), ALIASES_TABLE)
 
 
-def build_database(parquet_path: Path, db_path: Path, table: str) -> int:
-    """Build the database at `db_path` from `parquet_path`; returns the complaint row count."""
+def build_database(registry: Registry, db_path: Path) -> dict[str, int]:
+    """Build the database at `db_path`; returns {lob_id: row_count} for the loaded LOBs."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = db_path.with_name(db_path.name + ".tmp")
     tmp_path.unlink(missing_ok=True)
 
+    counts: dict[str, int] = {}
     with duckdb.connect(str(tmp_path)) as con:
-        count = load_complaints(con, table, parquet_path)
+        for lob in registry.lobs.values():
+            if not source_exists(lob):
+                logger.warning("%s: skipped, %s not found", lob.id, lob.source)
+                continue
+            counts[lob.id] = load_lob_table(con, lob)
         load_company_aliases(con)
+
+    if not counts:
+        tmp_path.unlink(missing_ok=True)
+        raise SystemExit("No LOB source files found. Run `python -m ingestion.clean` first.")
 
     os.replace(tmp_path, db_path)
     logger.info("Wrote %s", db_path)
-    return count
+    return counts
 
 
-def main(input_path: Path = CLEANED_COMPLAINTS_PATH) -> None:
-    """Load cleaned complaints and the alias table into DuckDB."""
-    if not input_path.exists():
-        raise SystemExit(f"{input_path} not found. Run `python -m ingestion.clean` first.")
-    build_database(input_path, settings.duckdb_path, settings.sql_table)
+def main() -> None:
+    build_database(get_registry(), settings.duckdb_path)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,9 @@ import duckdb
 import pandas as pd
 
 from ingestion.clean import FINAL_COLUMNS, clean_complaints
-from ingestion.embed_narratives import build_point
-from ingestion.load_duckdb import COMPANY_ALIASES, COMPLAINTS_SCHEMA, build_database
+from ingestion.embed_narratives import build_point, load_texts, point_id
+from ingestion.load_duckdb import COMPANY_ALIASES
+from ingestion.pull_cfpb import loses_narratives
 
 
 def raw_row(**overrides):
@@ -62,34 +63,57 @@ def test_clean_complaints_nulls_dedup_and_zip_masks():
     assert pd.isna(df.iloc[1]["zip_code"])
 
 
-def test_build_point_payload_is_json_safe():
+def test_build_point_payload_is_json_safe(registry):
+    rag = registry.get("cards").rag
     row = clean_complaints(pd.DataFrame([raw_row(**{"Sub-issue": None})])).iloc[0]
-    point = build_point(row, [0.1, 0.2])
+    point = build_point(row, [0.1, 0.2], rag)
 
     assert point.id == 111
     assert point.payload["complaint_id"] == "111"
     assert point.payload["sub_issue"] is None
     assert point.payload["date_received"] == "2024-03-05"
     assert point.payload["narrative"] == "I was charged a late fee."
+    assert set(point.payload) == {*rag.payload_fields, "complaint_id", "narrative"}
 
 
-def test_schema_matches_cleaned_columns():
-    assert list(COMPLAINTS_SCHEMA) == FINAL_COLUMNS
+def test_point_id_is_stable():
+    assert point_id("c", "123") == 123
+    assert point_id("c", "tx-1") == point_id("c", "tx-1") != point_id("other", "tx-1")
 
 
-def test_build_database_from_parquet(tmp_path):
-    parquet = tmp_path / "complaints.parquet"
-    clean_complaints(pd.DataFrame([raw_row(), raw_row(**{"Complaint ID": "222"})])).to_parquet(
-        parquet, index=False
-    )
-    db_path = tmp_path / "db" / "complaints.duckdb"
+def test_load_texts_applies_lob_filter_and_skips_empty(registry):
+    df = load_texts(registry.get("cards"))
+    assert sorted(df["complaint_id"]) == ["1", "3"]  # 2 has no narrative, 4 is a mortgage
 
-    assert build_database(parquet, db_path, "complaints") == 2
-    assert not db_path.with_name(db_path.name + ".tmp").exists()
 
-    with duckdb.connect(str(db_path), read_only=True) as con:
-        assert con.execute("SELECT DISTINCT date_received FROM complaints").fetchone() == (
-            datetime.date(2024, 3, 5),
+def test_build_database_one_table_per_lob(registry, built_db):
+    assert not built_db.with_name(built_db.name + ".tmp").exists()
+
+    with duckdb.connect(str(built_db), read_only=True) as con:
+        tables = {name for (name,) in con.execute("SHOW TABLES").fetchall()}
+        assert tables == {
+            "card_complaints",
+            "mortgage_complaints",
+            "transactions",
+            "company_aliases",
+        }
+        assert con.execute("SELECT COUNT(*) FROM card_complaints").fetchone() == (3,)
+        assert con.execute("SELECT DISTINCT product FROM mortgage_complaints").fetchall() == [
+            ("Mortgage",)
+        ]
+        assert con.execute("SELECT MIN(date_received) FROM card_complaints").fetchone() == (
+            datetime.date(2024, 1, 5),
         )
         (aliases,) = con.execute("SELECT COUNT(*) FROM company_aliases").fetchone()
         assert aliases == len(COMPANY_ALIASES)
+
+
+def test_pull_never_overwrites_narratives(tmp_path):
+    old = tmp_path / "credit_card.csv"
+    pd.DataFrame({"Complaint ID": ["1"], "Consumer complaint narrative": ["text"]}).to_csv(old)
+    without = pd.DataFrame({"Complaint ID": ["1"]})
+    with_text = pd.DataFrame({"Complaint ID": ["1"], "Consumer complaint narrative": ["x"]})
+
+    assert loses_narratives(old, without) is True
+    assert loses_narratives(old, with_text) is False
+    assert loses_narratives(tmp_path / "new.csv", without) is False

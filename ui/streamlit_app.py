@@ -1,14 +1,14 @@
 """
-Streamlit UI for Complaint Insights Agent.
+Streamlit UI for the Complaint Insights Agent.
 
-Features:
-- Chat interface for natural language queries
-- Visualization of SQL results (tables, charts)
-- Display of RAG results with narrative snippets
-- Query history
+- Chat interface; the line of business and the local model are picked right next to
+  the message box, per question
+- Answers show the route, dataset, model and response time, with the SQL result
+  (chart / table / query) and the matching texts in collapsible sections
 """
 
 import os
+import time
 from typing import Any
 
 import pandas as pd
@@ -21,236 +21,356 @@ API_URL = os.getenv("API_URL", "http://localhost:8000")
 API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "180"))
 REPO_URL = "https://github.com/neuralis-intelligence/domain-vault-rag"
 
-# Page config
+ROUTE_BADGES = {
+    "sql": ("SQL", ":material/table_chart:", "blue"),
+    "rag": ("Text search", ":material/search:", "violet"),
+    "hybrid": ("SQL + text", ":material/join:", "orange"),
+}
+
 st.set_page_config(
-    page_title="CFPB Complaint Insights",
-    page_icon="🏦",
-    layout="wide",
+    page_title="Complaint Insights",
+    page_icon=":material/forum:",
+    layout="centered",
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS
-st.markdown(
+# A little spacing polish; colors come from the theme so dark mode keeps working.
+st.html(
     """
     <style>
-    .stChatMessage {
-        background-color: #f0f2f6;
-        border-radius: 10px;
-        padding: 10px;
-        margin: 5px 0;
-    }
-    .metric-card {
-        background-color: #ffffff;
-        border-radius: 5px;
-        padding: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
+    .block-container { padding-top: 2.5rem; padding-bottom: 7rem; }
+    .st-key-composer-options { gap: 0.5rem; }
+    .st-key-composer-options [data-testid="stSelectbox"] { min-width: 0; }
+    [data-testid="stChatMessage"] { padding: 0.75rem 0.25rem; }
+    .muted { opacity: 0.65; font-size: 0.9rem; }
     </style>
-    """,
-    unsafe_allow_html=True,
+    """
 )
 
 
-def query_api(question: str) -> dict[str, Any] | None:
-    """Send question to FastAPI backend."""
+# --------------------------------------------------------------------------------------
+# API
+# --------------------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch(path: str) -> dict[str, Any] | None:
+    """GET an API endpoint (cached briefly so reruns don't refetch)."""
     try:
-        response = requests.post(
-            f"{API_URL}/ask",
-            json={"question": question},
-            timeout=API_TIMEOUT_SECONDS,
-        )
+        response = requests.get(f"{API_URL}{path}", timeout=10)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API Error: {e}")
+    except requests.exceptions.RequestException:
         return None
 
 
-def visualize_sql_results(results: list, question: str):
-    """Create visualizations for SQL query results."""
-    if not results:
-        st.info("No results to display")
-        return
-
-    # Convert to DataFrame
-    df = pd.DataFrame(results)
-
-    # Display as table
-    st.dataframe(df, width="stretch")
-
-    # Auto-generate chart if appropriate
-    if len(df.columns) == 2 and len(df) <= 20:
-        # Likely a count/aggregation query - create bar chart
-        col1, col2 = df.columns
-        fig = px.bar(
-            df,
-            x=col1,
-            y=col2,
-            title=f"Results: {question}",
-            labels={col1: col1.replace("_", " ").title(), col2: col2.replace("_", " ").title()},
+def ask(question: str, lob: str, model: str) -> tuple[dict[str, Any] | None, str | None, float]:
+    """POST /ask. Returns (result, error message, seconds taken)."""
+    start = time.perf_counter()
+    try:
+        response = requests.post(
+            f"{API_URL}/ask",
+            json={"question": question, "lob": lob, "model": model},
+            timeout=API_TIMEOUT_SECONDS,
         )
-        st.plotly_chart(fig, width="stretch")
+    except requests.exceptions.Timeout:
+        return None, f"No answer after {API_TIMEOUT_SECONDS}s. Try a smaller model.", 0.0
+    except requests.exceptions.RequestException as e:
+        return None, f"Couldn't reach the API at {API_URL}: {e}", 0.0
 
-
-def display_rag_results(documents: list):
-    """Display RAG search results with narratives."""
-    if not documents:
-        st.info("No narratives found")
-        return
-
-    st.subheader(f"Found {len(documents)} relevant complaints")
-
-    for i, doc in enumerate(documents, 1):
-        with st.expander(
-            f"Complaint {i}: {doc.get('company', 'Unknown')} - {doc.get('issue', 'Unknown')}"
-        ):
-            st.markdown(f"**Complaint ID:** {doc.get('complaint_id', 'N/A')}")
-            st.markdown(f"**Company:** {doc.get('company', 'N/A')}")
-            st.markdown(f"**Product:** {doc.get('product', 'N/A')}")
-            st.markdown(f"**Issue:** {doc.get('issue', 'N/A')}")
-            st.markdown(f"**State:** {doc.get('state', 'N/A')}")
-            st.markdown(f"**Similarity Score:** {doc.get('score', 0):.3f}")
-            st.markdown("**Narrative:**")
-            st.markdown(f"> {doc.get('narrative', 'No narrative available')}")
-
-
-def main():
-    """Main Streamlit app."""
-
-    # Sidebar
-    with st.sidebar:
-        st.title("🏦 CFPB Complaint Insights")
-        st.markdown("---")
-
-        st.subheader("About")
-        st.markdown("""
-        Ask natural language questions about CFPB bank complaints.
-        The system will automatically route your query to:
-        - **SQL** for statistics and trends
-        - **RAG** for narrative exploration
-        - **Hybrid** for both
-        """)
-
-        st.markdown("---")
-        st.subheader("Example Questions")
-        examples = [
-            "What is the most common issue at Bank of America?",
-            "How many mortgage complaints did Wells Fargo receive?",
-            "What are customers saying about Chase fraud cases?",
-            "Top 5 banks by complaint volume",
-            "Show me complaints about credit card fees",
-        ]
-
-        for example in examples:
-            if st.button(example, key=f"example_{example[:20]}"):
-                st.session_state.current_question = example
-
-        st.markdown("---")
-
-        # API status
+    elapsed = time.perf_counter() - start
+    if not response.ok:
         try:
-            health = requests.get(f"{API_URL}/health", timeout=5).json()
-        except requests.exceptions.RequestException:
-            st.error("❌ API Offline")
-        else:
-            if health.get("status") == "healthy":
-                st.success("✅ API Connected")
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        return None, f"{detail} (HTTP {response.status_code})", elapsed
+    return response.json(), None, elapsed
+
+
+# --------------------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------------------
+
+
+def render_chart(df: pd.DataFrame, key: str) -> None:
+    """Bar chart for label/value results, line chart for time series."""
+    if len(df.columns) != 2 or not 1 < len(df) <= 50:
+        return
+    x, y = df.columns
+    if not pd.api.types.is_numeric_dtype(df[y]):
+        return
+    labels = {x: x.replace("_", " ").title(), y: y.replace("_", " ").title()}
+    is_time = pd.api.types.is_datetime64_any_dtype(df[x]) or any(
+        word in x.lower() for word in ("date", "month", "year", "week", "day")
+    )
+    if is_time:
+        fig = px.line(df, x=x, y=y, markers=True, labels=labels)
+    else:
+        fig = px.bar(df.sort_values(y), x=y, y=x, orientation="h", labels=labels)
+    fig.update_layout(
+        margin={"l": 0, "r": 0, "t": 10, "b": 0},
+        height=max(260, 28 * len(df)) if not is_time else 320,
+        yaxis_title=None,
+    )
+    st.plotly_chart(fig, width="stretch", key=f"chart_{key}")
+
+
+def render_sql(sql_result: dict[str, Any], key: str) -> None:
+    rows = sql_result.get("results") or []
+    if sql_result.get("error"):
+        with st.expander("Query details", icon=":material/error:"):
+            st.caption(sql_result["error"])
+            if sql_result.get("sql"):
+                st.code(sql_result["sql"], language="sql")
+        return
+    if not rows:
+        return
+
+    df = pd.DataFrame(rows)
+    with st.expander(
+        f"Data · {len(df):,} row{'s' if len(df) != 1 else ''}",
+        icon=":material/table_chart:",
+        expanded=len(df) > 1,
+    ):
+        chart_tab, table_tab, sql_tab = st.tabs(["Chart", "Table", "SQL"])
+        with chart_tab:
+            if len(df.columns) == 2 and len(df) > 1:
+                render_chart(df, key)
             else:
-                st.warning("⚠️ API degraded")
-            for service in ("ollama", "qdrant", "duckdb"):
-                st.caption(f"{service}: {health.get(service, 'unknown')}")
+                st.caption("No chart for this result shape.")
+        with table_tab:
+            st.dataframe(df, width="stretch", hide_index=True)
+        with sql_tab:
+            st.code(sql_result.get("sql", ""), language="sql")
 
-    # Main content
-    st.title("💬 Ask About Bank Complaints")
 
-    # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+def render_sources(documents: list[dict[str, Any]]) -> None:
+    if not documents:
+        return
+    with st.expander(f"Sources · {len(documents)}", icon=":material/description:"):
+        for i, doc in enumerate(documents):
+            if i:
+                st.divider()
+            fields = doc.get("fields") or {}
+            title = " · ".join(str(v) for k, v in fields.items() if v and k in ("company", "issue"))
+            title = title or " · ".join(str(v) for v in list(fields.values())[:2] if v) or "Result"
+            head, score = st.columns([5, 1], vertical_alignment="center")
+            head.markdown(f"**{title}**")
+            score.badge(f"{doc.get('score', 0):.2f}", color="gray")
+            meta = [f"#{doc.get('id')}"] + [
+                str(v) for k, v in fields.items() if v and k not in ("company", "issue")
+            ]
+            st.caption(" · ".join(meta))
+            text = doc.get("text") or ""
+            st.markdown(f"> {text[:600]}{'…' if len(text) > 600 else ''}")
 
-    if "current_question" not in st.session_state:
-        st.session_state.current_question = ""
 
-    # Display chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+def render_meta(message: dict[str, Any]) -> None:
+    """Small badges under an answer: route, dataset, model, time."""
+    label, icon, color = ROUTE_BADGES.get(message.get("route", ""), ("?", None, "gray"))
+    with st.container(horizontal=True, gap="small"):
+        st.badge(label, icon=icon, color=color)
+        st.badge(message.get("lob_name", ""), icon=":material/folder:", color="gray")
+        st.badge(message.get("model", ""), icon=":material/memory:", color="gray")
+        if message.get("seconds"):
+            st.badge(f"{message['seconds']:.1f}s", icon=":material/timer:", color="gray")
 
-            # Display visualizations if available
-            if "sql_results" in message:
-                visualize_sql_results(message["sql_results"], message.get("question", ""))
 
-            if "rag_documents" in message:
-                display_rag_results(message["rag_documents"])
+def render_assistant(message: dict[str, Any], key: str) -> None:
+    if message.get("error"):
+        st.error(message["error"], icon=":material/error:")
+        return
+    st.markdown(message["content"])
+    render_meta(message)
+    if message.get("sql_result"):
+        render_sql(message["sql_result"], key)
+    if message.get("documents"):
+        render_sources(message["documents"])
 
-    # Chat input
-    question = st.chat_input("Ask a question about bank complaints...")
 
-    # Handle example button clicks
-    if st.session_state.current_question:
-        question = st.session_state.current_question
-        st.session_state.current_question = ""
+# --------------------------------------------------------------------------------------
+# Pickers (shown next to the message box)
+# --------------------------------------------------------------------------------------
 
-    if question:
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(question)
 
-        st.session_state.messages.append({"role": "user", "content": question})
-
-        # Query API
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                result = query_api(question)
-
-            if result:
-                # Display answer
-                answer = result.get("answer", "No answer available")
-                route = result.get("route", "unknown")
-
-                st.markdown(answer)
-                st.caption(f"Route: {route.upper()}")
-
-                # Store message with metadata
-                message_data = {
-                    "role": "assistant",
-                    "content": answer,
-                    "question": question,
-                    "route": route,
-                }
-
-                # Handle SQL results
-                if "sql_result" in result.get("metadata", {}):
-                    sql_result = result["metadata"]["sql_result"]
-                    if "results" in sql_result and sql_result["results"]:
-                        message_data["sql_results"] = sql_result["results"]
-                        visualize_sql_results(sql_result["results"], question)
-
-                # Handle RAG results
-                if "rag_result" in result.get("metadata", {}):
-                    rag_result = result["metadata"]["rag_result"]
-                    if "documents" in rag_result and rag_result["documents"]:
-                        message_data["rag_documents"] = rag_result["documents"]
-                        display_rag_results(rag_result["documents"])
-
-                st.session_state.messages.append(message_data)
-
-            else:
-                st.error("Failed to get response from API")
-
-    # Footer
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(
-            "Total Questions", len([m for m in st.session_state.messages if m["role"] == "user"])
+def pick_lob(lobs_data: dict[str, Any]) -> dict[str, Any] | None:
+    loaded = [lob for lob in lobs_data["lobs"] if lob["sql_available"]]
+    if not loaded:
+        return None
+    by_id = {lob["id"]: lob for lob in loaded}
+    if st.session_state.get("lob") not in by_id:
+        st.session_state.lob = (
+            lobs_data["default"] if lobs_data["default"] in by_id else loaded[0]["id"]
         )
-    with col2:
-        if st.button("Clear History"):
+    lob_id = st.selectbox(
+        "Line of business",
+        list(by_id),
+        key="lob",
+        format_func=lambda i: by_id[i]["name"],
+        label_visibility="collapsed",
+        width=190,
+        help="Which dataset to ask about",
+    )
+    return by_id[lob_id]
+
+
+def pick_model(models_data: dict[str, Any]) -> str | None:
+    models = models_data["models"]
+    if not models:
+        return None
+    by_name = {m["name"]: m for m in models}
+    if st.session_state.get("model") not in by_name:
+        default = models_data["default"]
+        st.session_state.model = default if default in by_name else models[0]["name"]
+    return st.selectbox(
+        "Model",
+        list(by_name),
+        key="model",
+        format_func=lambda n: f"{n} · {by_name[n]['parameter_size'] or '?'}",
+        label_visibility="collapsed",
+        width=220,
+        help="Local model that answers. Smaller is faster; larger writes better SQL.",
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Page
+# --------------------------------------------------------------------------------------
+
+
+def sidebar(health: dict[str, Any] | None) -> None:
+    with st.sidebar:
+        st.markdown("### :material/forum: Complaint Insights")
+        st.caption("Ask questions about financial complaint data in plain English.")
+
+        if st.button("New chat", icon=":material/add:", width="stretch", type="primary"):
             st.session_state.messages = []
             st.rerun()
-    with col3:
-        st.markdown(f"[View on GitHub]({REPO_URL})")
+
+        st.space("small")
+        st.markdown("**Services**")
+        if health is None:
+            st.badge("API offline", icon=":material/cloud_off:", color="red")
+        else:
+            with st.container(horizontal=True, gap="small", wrap=True):
+                for service in ("ollama", "qdrant", "duckdb"):
+                    ok = health.get(service) == "connected"
+                    st.badge(
+                        service.capitalize() if service != "duckdb" else "DuckDB",
+                        icon=":material/check_circle:" if ok else ":material/error:",
+                        color="green" if ok else "red",
+                    )
+
+        st.space("small")
+        with st.expander("How it works", icon=":material/info:"):
+            st.markdown(
+                "Pick a **line of business** and a **model** next to the message box. "
+                "Each question is routed to:\n"
+                "- **SQL** for counts, rankings and trends\n"
+                "- **Text search** for what people wrote\n"
+                "- **SQL + text** for both"
+            )
+        st.caption(f"[Source on GitHub]({REPO_URL})")
 
 
-if __name__ == "__main__":
-    main()
+def empty_state(lob: dict[str, Any] | None) -> None:
+    st.space("large")
+    st.markdown("## What would you like to know?")
+    if lob:
+        st.markdown(
+            f"<p class='muted'>Asking about <b>{lob['name']}</b> · {lob['rows']:,} records. "
+            "Switch dataset or model next to the message box.</p>",
+            unsafe_allow_html=True,
+        )
+        examples = lob.get("example_questions") or []
+        if examples:
+            key = f"examples_{lob['id']}"
+
+            def use_example() -> None:
+                st.session_state.pending_question = st.session_state[key]
+                st.session_state[key] = None
+
+            st.pills(
+                "Try one of these",
+                examples,
+                key=key,
+                on_change=use_example,
+                label_visibility="collapsed",
+            )
+
+
+def main() -> None:
+    st.session_state.setdefault("messages", [])
+
+    health = fetch("/health")
+    sidebar(health)
+
+    lobs_data, models_data = fetch("/lobs"), fetch("/models")
+    if health is None or lobs_data is None:
+        st.error(
+            f"Can't reach the API at {API_URL}. Start it with `uvicorn app.main:app --reload`.",
+            icon=":material/cloud_off:",
+        )
+        st.stop()
+
+    # Composer: dataset + model pickers beside the message box, pinned to the bottom.
+    with st.bottom:
+        with st.container(horizontal=True, gap="small", key="composer-options"):
+            lob = pick_lob(lobs_data)
+            model = pick_model(models_data) if models_data else None
+            not_loaded = [x["name"] for x in lobs_data["lobs"] if not x["sql_available"]]
+            if not_loaded:
+                st.caption(f"Not loaded yet: {', '.join(not_loaded)}", width="content")
+        typed = st.chat_input(
+            f"Ask about {lob['name'].lower()}…" if lob else "No data loaded",
+            disabled=not (lob and model),
+        )
+
+    if lob is None:
+        st.warning("No line of business has data loaded. Run `python -m ingestion.load_duckdb`.")
+    if model is None:
+        st.warning("No local models found. Is Ollama running? Try `ollama pull llama3.2`.")
+
+    question = typed or st.session_state.pop("pending_question", None)
+
+    if not st.session_state.messages and not question:
+        empty_state(lob)
+        return
+
+    for i, message in enumerate(st.session_state.messages):
+        with st.chat_message(message["role"]):
+            if message["role"] == "user":
+                st.markdown(message["content"])
+            else:
+                render_assistant(message, key=str(i))
+
+    if not (question and lob and model):
+        return
+
+    st.session_state.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        with st.spinner(f"Thinking with {model}…"):
+            result, error, seconds = ask(question, lob["id"], model)
+
+        metadata = (result or {}).get("metadata") or {}
+        message = {
+            "role": "assistant",
+            "question": question,
+            "content": (result or {}).get("answer", ""),
+            "error": error,
+            "route": (result or {}).get("route"),
+            "lob_name": lob["name"],
+            "model": (result or {}).get("model", model),
+            "seconds": seconds,
+            "sql_result": metadata.get("sql_result"),
+            "documents": (metadata.get("rag_result") or {}).get("documents"),
+        }
+        render_assistant(message, key=str(len(st.session_state.messages)))
+    st.session_state.messages.append(message)
+
+
+main()
