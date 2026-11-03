@@ -1,1 +1,1 @@
-"""ETL pipeline: download -> clean -> BigQuery -> Qdrant."""
+"""ETL pipeline: download -> clean -> DuckDB -> Qdrant."""

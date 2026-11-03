@@ -2,7 +2,7 @@
 LangGraph workflow for routing and orchestrating SQL/RAG/hybrid queries.
 
 1. Router: classify the query as sql/rag/hybrid
-2. SQL tool: text-to-SQL on BigQuery
+2. SQL tool: text-to-SQL on DuckDB
 3. RAG tool: semantic search on Qdrant
 4. Hybrid: SQL first, then RAG filtered by the SQL result
 5. Synthesis: generate the final answer with the LLM

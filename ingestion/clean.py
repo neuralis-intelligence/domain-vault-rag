@@ -59,7 +59,7 @@ TEXT_COLUMNS = (
     "tags",
 )
 
-# Final column order; must match the BigQuery schema in load_bigquery.py.
+# Final column order; must match COMPLAINTS_SCHEMA in load_duckdb.py.
 FINAL_COLUMNS = [
     "complaint_id",
     "date_received",
@@ -86,7 +86,7 @@ def rename_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert ISO timestamps to calendar dates (BigQuery DATE)."""
+    """Convert ISO timestamps to calendar dates (SQL DATE)."""
     for col in DATE_COLUMNS:
         df[col] = pd.to_datetime(df[col], errors="coerce", utc=True).dt.date
     return df
@@ -150,7 +150,7 @@ def main(output_path: Path = CLEANED_COMPLAINTS_PATH) -> None:
         cleaned["consumer_complaint_narrative"].notna().sum(),
         output_path,
     )
-    logger.info("Next: python -m ingestion.load_bigquery and python -m ingestion.embed_narratives")
+    logger.info("Next: python -m ingestion.load_duckdb and python -m ingestion.embed_narratives")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ htmlcov/
 
 # Secrets
 .env
-credentials/
 
 # Data (large / regenerable) - keep the folder skeleton only
 data/raw/*

@@ -11,9 +11,8 @@ pandas==3.0.5
 pyarrow==25.0.1
 tqdm==4.70.1
 
-# BigQuery (SQL path)
-google-cloud-bigquery==3.46.1
-db-dtypes==1.7.2
+# SQL path
+duckdb==1.5.6
 
 # Vector search (RAG path)
 qdrant-client==1.19.1

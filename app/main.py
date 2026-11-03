@@ -3,7 +3,7 @@ FastAPI backend for the Complaint Insights Agent.
 
 Endpoints:
 - GET  /         service info
-- GET  /health   connectivity to Ollama, Qdrant and BigQuery
+- GET  /health   connectivity to Ollama, Qdrant and DuckDB
 - POST /ask      answer a natural-language question (routes sql/rag/hybrid)
 - POST /feedback record user feedback on an answer
 """
@@ -21,6 +21,7 @@ from app.config import settings
 from app.graph import ComplaintInsightsGraph, get_graph
 from app.llm import get_llm_client
 from app.rag_tool import get_rag_tool
+from app.sql_tool import get_sql_tool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -71,9 +72,9 @@ async def health_check():
     checks = {
         "ollama": "connected" if get_llm_client().is_available() else "unavailable",
         "qdrant": "connected" if get_rag_tool().is_available() else "unavailable",
-        "bigquery": "configured" if settings.bigquery_project_id else "not configured",
+        "duckdb": "connected" if get_sql_tool().is_available() else "unavailable",
     }
-    healthy = checks["ollama"] == "connected" and checks["qdrant"] == "connected"
+    healthy = all(status == "connected" for status in checks.values())
     return {"status": "healthy" if healthy else "degraded", **checks}
 
 
