@@ -44,6 +44,16 @@ class TestValidateSQL:
             "LIMIT 100"
         )
 
+    def test_stacked_limits_collapsed_to_smallest(self, sql_tool):
+        sql = "SELECT company, COUNT(*) AS n FROM complaints GROUP BY company\nLIMIT 5\nLIMIT 1"
+        assert sql_tool.validate_sql(sql) == (
+            "SELECT company, COUNT(*) AS n FROM complaints GROUP BY company\nLIMIT 1"
+        )
+
+    def test_limit_inside_subquery_untouched(self, sql_tool):
+        sql = "WITH t AS (SELECT company FROM complaints LIMIT 5) SELECT * FROM t LIMIT 1"
+        assert sql_tool.validate_sql(sql) == sql
+
     def test_trailing_semicolon_stripped(self, sql_tool):
         assert sql_tool.validate_sql("SELECT 1 LIMIT 1;") == "SELECT 1 LIMIT 1"
 

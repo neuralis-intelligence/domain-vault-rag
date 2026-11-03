@@ -72,7 +72,6 @@ FROM {table}
 WHERE company = 'JPMORGAN CHASE & CO.'
   AND product = 'Credit card'
   AND EXTRACT(YEAR FROM date_received) = 2024
-LIMIT 1
 
 Q: "Top 5 companies by complaint volume"
 SQL:
@@ -81,6 +80,22 @@ FROM {table}
 GROUP BY company
 ORDER BY complaint_count DESC
 LIMIT 5
+
+Q: "Among the top 5 companies by complaint volume, which has the most mortgage complaints?"
+SQL:
+WITH top_companies AS (
+  SELECT company
+  FROM {table}
+  GROUP BY company
+  ORDER BY COUNT(*) DESC
+  LIMIT 5
+)
+SELECT company, COUNT(*) AS mortgage_complaints
+FROM {table}
+WHERE product = 'Mortgage' AND company IN (SELECT company FROM top_companies)
+GROUP BY company
+ORDER BY mortgage_complaints DESC
+LIMIT 1
 """
 
     retry_note = (
@@ -98,7 +113,7 @@ Generate a valid SQL query to answer the user's question.
 
 Rules:
 1. Only use a single SELECT statement
-2. Always include a LIMIT clause (max 1000 rows)
+2. End the query with exactly ONE LIMIT clause (max 1000 rows); never write two LIMITs in a row. For "top N, then the highest of those" questions, put the first LIMIT inside a WITH subquery
 3. Use DuckDB syntax, e.g. EXTRACT(YEAR FROM date_received), date_trunc('month', date_received)
 4. Query the table as {table} (no backticks, no dataset prefix)
 5. Return ONLY the SQL query, no explanations or markdown
