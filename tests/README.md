@@ -27,8 +27,8 @@ Install test dependencies with `pip install -r requirements-dev.txt`.
 
 ## Notes
 
-- Unit tests mock the LLM (`fake_llm` fixture in `conftest.py`), Qdrant and BigQuery, so they
-  run offline in a few seconds.
+- Unit tests mock the LLM (`fake_llm` fixture in `conftest.py`), and Qdrant, and use a
+  throwaway DuckDB file, so they run offline in a few seconds.
 - Tests marked `@pytest.mark.integration` are skipped by default (see `pyproject.toml`).
   The live router tests need `ollama pull qwen2.5:7b-instruct`; the live search test needs
   narratives embedded with `python -m ingestion.embed_narratives`.

@@ -157,7 +157,7 @@ def main():
                 st.success("✅ API Connected")
             else:
                 st.warning("⚠️ API degraded")
-            for service in ("ollama", "qdrant", "bigquery"):
+            for service in ("ollama", "qdrant", "duckdb"):
                 st.caption(f"{service}: {health.get(service, 'unknown')}")
 
     # Main content

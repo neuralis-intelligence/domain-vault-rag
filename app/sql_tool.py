@@ -1,19 +1,24 @@
 """
-Text-to-SQL tool for BigQuery.
+Text-to-SQL tool for DuckDB.
 
 Implements:
 - LLM-based SQL generation from natural language
 - Schema injection with examples
 - Query validation (SELECT-only, single statement, LIMIT enforcement)
-- BigQuery dry-run validation
+- EXPLAIN validation (catches syntax / unknown-column errors before running)
 - One retry with the error fed back to the LLM
+
+The database is opened read-only with external file/network access disabled, a second
+safety layer on top of the keyword guardrails. Build it with `python -m ingestion.load_duckdb`.
 """
 
 import logging
 import re
+import threading
+from pathlib import Path
 from typing import Any
 
-from google.cloud import bigquery
+import duckdb
 
 from app.config import settings
 from app.llm import get_llm_client
@@ -38,44 +43,78 @@ _LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*$", re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE)
 
 
+# Generated SQL may only see the database itself: no reading local files or URLs
+# (read_csv, read_parquet, ...), no installing/loading extensions, and the settings
+# can't be changed back by a query.
+_LOCKED_DOWN_CONFIG = {
+    "enable_external_access": False,
+    "autoinstall_known_extensions": False,
+    "autoload_known_extensions": False,
+    "lock_configuration": True,
+}
+
+
 class SQLValidationError(ValueError):
     """Raised when generated SQL fails the safety checks."""
 
 
 class SQLTool:
-    """Text-to-SQL query executor."""
+    """Text-to-SQL query executor backed by a local DuckDB file."""
 
     def __init__(
         self,
-        project_id: str | None = None,
-        dataset_id: str | None = None,
-        table_id: str | None = None,
+        db_path: Path | str | None = None,
+        table: str | None = None,
         max_rows: int | None = None,
+        timeout_seconds: float | None = None,
     ):
-        self.project_id = project_id or settings.bigquery_project_id
-        self.dataset_id = dataset_id or settings.bigquery_dataset
-        self.table_id = table_id or settings.bigquery_table
+        self.db_path = Path(db_path) if db_path else settings.duckdb_path
+        self.table = table or settings.sql_table
         self.max_rows = max_rows or settings.sql_max_rows
-        self._client: bigquery.Client | None = None
-        self.client_error = "BigQuery not configured (set BIGQUERY_PROJECT_ID)"
+        self.timeout_seconds = timeout_seconds or settings.sql_timeout_seconds
+        self._con: duckdb.DuckDBPyConnection | None = None
+        self._lock = threading.Lock()
+        self.client_error = ""
 
     @property
-    def client(self) -> bigquery.Client | None:
+    def connection(self) -> duckdb.DuckDBPyConnection | None:
         """
-        BigQuery client, created on first use so construction needs no credentials.
-        Returns None (and sets `client_error`) if it is not configured or cannot authenticate.
+        Read-only DuckDB connection, opened on first use.
+        Returns None (and sets `client_error`) if the database is missing or can't be opened.
         """
-        if self._client is None and self.project_id:
-            try:
-                self._client = bigquery.Client(project=self.project_id)
-            except Exception as e:  # e.g. google.auth DefaultCredentialsError
-                self.client_error = f"BigQuery client could not be created: {e}"
-                logger.error(self.client_error)
-        return self._client
+        with self._lock:
+            if self._con is None:
+                if not self.db_path.exists():
+                    self.client_error = (
+                        f"DuckDB database not found at {self.db_path}. "
+                        "Run `python -m ingestion.load_duckdb`."
+                    )
+                    logger.error(self.client_error)
+                    return None
+                try:
+                    self._con = duckdb.connect(
+                        str(self.db_path), read_only=True, config=_LOCKED_DOWN_CONFIG
+                    )
+                except duckdb.Error as e:
+                    self.client_error = f"DuckDB database could not be opened: {e}"
+                    logger.error(self.client_error)
+        return self._con
+
+    def is_available(self) -> bool:
+        """True if the database opens and the complaints table exists."""
+        con = self.connection
+        if con is None:
+            return False
+        try:
+            con.cursor().execute(f"SELECT 1 FROM {self.table} LIMIT 1")
+            return True
+        except duckdb.Error as e:
+            logger.warning("DuckDB health check failed: %s", e)
+            return False
 
     def generate_sql(self, question: str, previous_error: str | None = None) -> str:
         """Generate a SQL query for `question`, stripping any markdown fences."""
-        prompt = get_sql_prompt(question, self.dataset_id, self.table_id, previous_error)
+        prompt = get_sql_prompt(question, self.table, previous_error)
         sql_query = get_llm_client().generate(prompt, temperature=0.0)
         return _CODE_FENCE_RE.sub("", sql_query.strip()).strip()
 
@@ -110,38 +149,45 @@ class SQLTool:
 
         return sql
 
-    def dry_run(self, sql_query: str) -> str | None:
-        """Validate query syntax with a BigQuery dry run. Returns an error message or None."""
-        if not self.client:
-            logger.warning("BigQuery client not configured, skipping dry run")
+    def explain(self, sql_query: str) -> str | None:
+        """Validate the query with EXPLAIN (no execution). Returns an error message or None."""
+        con = self.connection
+        if con is None:
+            logger.warning("DuckDB not available, skipping EXPLAIN")
             return None
 
         try:
-            job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-            job = self.client.query(sql_query, job_config=job_config)
-            logger.info("Dry run OK; query will process %s bytes", job.total_bytes_processed)
+            con.cursor().execute(f"EXPLAIN {sql_query}")
             return None
-        except Exception as e:  # google.api_core raises many exception types
-            logger.error("Dry run failed: %s", e)
+        except duckdb.Error as e:
+            logger.error("EXPLAIN failed: %s", e)
             return str(e)
 
     def execute_query(self, sql_query: str) -> dict[str, Any]:
-        """Execute SQL on BigQuery and return rows plus metadata."""
-        if not self.client:
+        """Execute SQL on DuckDB and return rows plus metadata."""
+        con = self.connection
+        if con is None:
             return {"error": self.client_error, "sql": sql_query, "results": []}
 
+        # A cursor per query: DuckDB connections aren't safe to share across threads.
+        cursor = con.cursor()
+        timer = threading.Timer(self.timeout_seconds, cursor.interrupt)
+        timer.start()
         try:
-            job = self.client.query(sql_query)
-            rows = [dict(row) for row in job.result(timeout=settings.sql_timeout_seconds)]
-            return {
-                "sql": sql_query,
-                "results": rows,
-                "row_count": len(rows),
-                "bytes_processed": job.total_bytes_processed,
-            }
-        except Exception as e:
+            cursor.execute(sql_query)
+            columns = [col[0] for col in cursor.description]
+            rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+            return {"sql": sql_query, "results": rows, "row_count": len(rows)}
+        except duckdb.InterruptException:
+            error = f"Query timed out after {self.timeout_seconds}s"
+            logger.error(error)
+            return {"error": error, "sql": sql_query, "results": []}
+        except duckdb.Error as e:
             logger.error("Query execution failed: %s", e)
             return {"error": str(e), "sql": sql_query, "results": []}
+        finally:
+            timer.cancel()
+            cursor.close()
 
 
 _sql_tool: SQLTool | None = None
@@ -156,7 +202,7 @@ def get_sql_tool() -> SQLTool:
 
 
 def execute_sql_query(question: str, max_attempts: int = 2) -> dict[str, Any]:
-    """Run the text-to-SQL pipeline: generate -> validate -> dry run -> execute."""
+    """Run the text-to-SQL pipeline: generate -> validate -> EXPLAIN -> execute."""
     tool = get_sql_tool()
     error: str | None = None
     sql_query = ""
@@ -171,7 +217,7 @@ def execute_sql_query(question: str, max_attempts: int = 2) -> dict[str, Any]:
             error = str(e)
             continue
 
-        error = tool.dry_run(sql_query)
+        error = tool.explain(sql_query)
         if error is None:
             return tool.execute_query(sql_query)
 

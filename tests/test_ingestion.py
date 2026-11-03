@@ -2,10 +2,12 @@
 
 import datetime
 
+import duckdb
 import pandas as pd
 
 from ingestion.clean import FINAL_COLUMNS, clean_complaints
 from ingestion.embed_narratives import build_point
+from ingestion.load_duckdb import COMPANY_ALIASES, COMPLAINTS_SCHEMA, build_database
 
 
 def raw_row(**overrides):
@@ -69,3 +71,25 @@ def test_build_point_payload_is_json_safe():
     assert point.payload["sub_issue"] is None
     assert point.payload["date_received"] == "2024-03-05"
     assert point.payload["narrative"] == "I was charged a late fee."
+
+
+def test_schema_matches_cleaned_columns():
+    assert list(COMPLAINTS_SCHEMA) == FINAL_COLUMNS
+
+
+def test_build_database_from_parquet(tmp_path):
+    parquet = tmp_path / "complaints.parquet"
+    clean_complaints(pd.DataFrame([raw_row(), raw_row(**{"Complaint ID": "222"})])).to_parquet(
+        parquet, index=False
+    )
+    db_path = tmp_path / "db" / "complaints.duckdb"
+
+    assert build_database(parquet, db_path, "complaints") == 2
+    assert not db_path.with_name(db_path.name + ".tmp").exists()
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        assert con.execute("SELECT DISTINCT date_received FROM complaints").fetchone() == (
+            datetime.date(2024, 3, 5),
+        )
+        (aliases,) = con.execute("SELECT COUNT(*) FROM company_aliases").fetchone()
+        assert aliases == len(COMPANY_ALIASES)

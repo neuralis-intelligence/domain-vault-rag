@@ -8,7 +8,7 @@ requires-python = ">=3.11"
 testpaths = ["tests"]
 addopts = "-m 'not integration'"
 markers = [
-    "integration: needs live services (Ollama, Qdrant, BigQuery); run with -m integration",
+    "integration: needs live services (Ollama, Qdrant, DuckDB file); run with -m integration",
 ]
 filterwarnings = [
     # Unit tests construct QdrantClient without a server running.

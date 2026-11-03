@@ -18,7 +18,7 @@ Two kinds of questions need different tools:
 
 | Question Type | Example | Tool |
 |---|---|---|
-| Counting / ranking / trends | "Top issue at JPMorgan?" | **Text-to-SQL** on BigQuery |
+| Counting / ranking / trends | "Top issue at JPMorgan?" | **Text-to-SQL** on DuckDB |
 | What customers say | "What do people complain about in Chase fraud cases?" | **RAG** on complaint narratives |
 | Hybrid | "Top issue at JPMorgan and what are people saying?" | SQL first, then RAG filtered by the SQL result |
 
@@ -27,7 +27,7 @@ An LLM **router** (LangGraph) picks the path for each question.
 ```
 User → Streamlit UI → FastAPI /ask → LangGraph
                                       ├── route (LLM: sql | rag | hybrid)
-                                      ├── sql:    LLM → SQL → guardrails → dry run → BigQuery
+                                      ├── sql:    LLM → SQL → guardrails → EXPLAIN → DuckDB
                                       ├── rag:    embed question → Qdrant search (+ metadata filters)
                                       ├── hybrid: sql, then rag filtered by company/issue from the SQL result
                                       └── synthesize (LLM answer citing numbers / complaint IDs)
@@ -42,7 +42,7 @@ User → Streamlit UI → FastAPI /ask → LangGraph
 | **LLM** | Ollama + Qwen2.5 7B Instruct (or Llama 3.1 8B) |
 | **Embeddings** | `BAAI/bge-small-en-v1.5` (sentence-transformers, 384-dim) |
 | **Vector DB** | Qdrant (Docker) |
-| **Data Warehouse** | BigQuery |
+| **SQL Database** | DuckDB (local file, read-only at query time) |
 | **Agent Framework** | LangGraph |
 | **API** | FastAPI |
 | **Frontend** | Streamlit + Plotly |
@@ -69,7 +69,7 @@ domain-vault-rag/
 │   ├── main.py                 # GET /, GET /health, POST /ask, POST /feedback
 │   ├── graph.py                # LangGraph: route → sql/rag/hybrid → synthesize
 │   ├── router.py               # LLM query classification
-│   ├── sql_tool.py             # BigQuery text-to-SQL with guardrails
+│   ├── sql_tool.py             # DuckDB text-to-SQL with guardrails
 │   ├── rag_tool.py             # Qdrant semantic search
 │   ├── llm.py                  # Ollama client + answer synthesis
 │   └── prompts/                # Prompt templates (router, sql, synthesis)
@@ -77,12 +77,12 @@ domain-vault-rag/
 ├── ingestion/                  # ETL pipeline, run in this order
 │   ├── pull_cfpb.py            # 1. Download raw CSVs from the CFPB API
 │   ├── clean.py                # 2. Clean + unify → data/processed/complaints.parquet
-│   ├── load_bigquery.py        # 3. Load BigQuery table + company_aliases
+│   ├── load_duckdb.py          # 3. Build the DuckDB file + company_aliases
 │   └── embed_narratives.py     # 4. Embed narratives into Qdrant
 │
 ├── data/                       # Contents are gitignored (only .gitkeep is tracked)
 │   ├── raw/                    # credit_card.csv, mortgage.csv
-│   └── processed/              # complaints.parquet (+ notebook CSV exports)
+│   └── processed/              # complaints.parquet, complaints.duckdb (+ notebook CSV exports)
 │
 ├── notebooks/                  # Exploratory data analysis
 │   ├── credit_card_exploration.ipynb
@@ -100,7 +100,17 @@ domain-vault-rag/
 
 ---
 
-## Recent Changes (repo restructure)
+## Recent Changes
+
+### SQL backend: BigQuery → DuckDB
+The BigQuery sandbox deleted the loaded data after 60 days, and keeping it would have needed a billing account. The SQL path now runs on a local DuckDB file instead: free, no account, no expiry, and faster at this size.
+- New `ingestion/load_duckdb.py` builds `data/processed/complaints.duckdb` (~320 MB) from the cleaned Parquet file in about 10 s, with the same schema and `company_aliases` table. It builds a temp file and swaps it in, so a running API isn't disturbed.
+- `app/sql_tool.py` opens the database **read-only** with file/network access disabled (`enable_external_access=false`, configuration locked), so generated SQL can't read local files such as `read_csv('/etc/passwd')`. Queries are checked with `EXPLAIN` (replacing the BigQuery dry run) and interrupted after `SQL_TIMEOUT_SECONDS`.
+- The SQL prompt now targets DuckDB syntax and the bare table name `complaints`.
+- `/health` reports `duckdb: connected` only when the database opens and the table exists.
+- All BigQuery code, dependencies (`google-cloud-bigquery`, `db-dtypes`) and settings were removed. Docker mounts `data/processed` read-only instead of a service-account key.
+
+### Repo restructure
 
 The project was reorganised from the old `banking-qa-agent/` folder (whose source files were empty stubs) into the layout above. Main changes:
 
@@ -108,12 +118,12 @@ The project was reorganised from the old `banking-qa-agent/` folder (whose sourc
 - Notebooks moved to `notebooks/`, the download script to `ingestion/pull_cfpb.py`, and raw data to `data/raw/`.
 - New `app/config.py`: every module now reads settings from `.env` and uses the shared data paths.
 - `requirements.txt` lists all runtime dependencies (pinned); dev tools are in `requirements-dev.txt`.
-- `.gitignore` now excludes the data files, `.env`, `credentials/` and caches. Before this, the 286 MB of raw CSVs would have been committed.
+- `.gitignore` now excludes the data files, `.env` and caches. Before this, the 286 MB of raw CSVs would have been committed.
 - Added `pyproject.toml` (pytest + ruff), a `Dockerfile` and `.dockerignore`. `docker-compose.yml` used to reference Dockerfiles that didn't exist and an NVIDIA GPU block that fails on macOS.
 
 **Pipeline**
 - `ingestion/clean.py` is implemented, following the cleaning steps in the notebooks.
-- `ingestion/load_bigquery.py` is implemented. Its schema now matches the data: it adds `company_public_response` and `tags` and drops `consumer_disputed`, which isn't in the data. The table is partitioned by month and clustered by company and product, and the `company_aliases` table is seeded.
+- The SQL loader is implemented (now `ingestion/load_duckdb.py`). Its schema matches the data: it adds `company_public_response` and `tags` and drops `consumer_disputed`, which isn't in the data, and it seeds the `company_aliases` table.
 - `ingestion/embed_narratives.py` uses stable point IDs (the complaint ID), so re-runs don't create duplicates. It embeds and uploads batch by batch, makes payloads JSON-safe, adds keyword indexes for the filter fields, and has `--limit` and `--recreate` flags.
 - Notebook cells were out of order, so "Run All" crashed. They're reordered and now read from and write to the correct `data/` folders.
 
@@ -131,7 +141,7 @@ The project was reorganised from the old `banking-qa-agent/` folder (whose sourc
 - The UI shows each service's health, allows longer timeouts for local LLMs, and no longer uses deprecated Streamlit arguments.
 
 **Tests**
-- 55 offline unit tests with the LLM, Qdrant and BigQuery mocked. The live-service tests are marked `integration`.
+- 65 offline unit tests with the LLM and Qdrant mocked; SQL tests run against a throwaway DuckDB file. The live-service tests are marked `integration`.
 
 ---
 
@@ -143,7 +153,6 @@ All commands run from the project root with the virtual environment active.
 - Python 3.11+ (developed on 3.13)
 - [Ollama](https://ollama.com/download), installed natively (on macOS this uses the GPU; Ollama in Docker can't)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for Qdrant)
-- A Google Cloud project with BigQuery + the [gcloud CLI](https://cloud.google.com/sdk/docs/install) (SQL path only)
 
 ### Step 1: Install
 ```bash
@@ -152,12 +161,12 @@ cd domain-vault-rag
 python3 -m venv .myvenv
 source .myvenv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env            # edit BIGQUERY_PROJECT_ID (see the BigQuery section below)
+cp .env.example .env            # defaults work as-is
 ```
 
 ### Step 2: Check the install (no services needed)
 ```bash
-pytest          # 55 offline unit tests, ~5 s
+pytest          # 65 offline unit tests, ~5 s
 ruff check .    # lint
 ```
 
@@ -166,18 +175,19 @@ ruff check .    # lint
 docker compose up -d qdrant                 # Qdrant on :6333, dashboard at http://localhost:6333/dashboard
 ollama serve                                # skip if the Ollama desktop app is running
 ollama pull qwen2.5:7b-instruct             # ~4.7 GB, one-time
-gcloud auth application-default login       # BigQuery credentials for local runs
 ```
 
 ### Step 4: Run the data pipeline
 ```bash
 python -m ingestion.pull_cfpb                       # optional: re-download data/raw/*.csv (slow, rate-limited)
 python -m ingestion.clean                           # → data/processed/complaints.parquet (~5 s)
-python -m ingestion.load_bigquery                   # → BigQuery (see the BigQuery section below)
+python -m ingestion.load_duckdb                     # → data/processed/complaints.duckdb (~10 s)
 python -m ingestion.embed_narratives --limit 2000   # quick test sample
 python -m ingestion.embed_narratives                # all ~147K narratives (long on CPU)
 ```
 Add `--recreate` to `embed_narratives` to drop and rebuild the Qdrant collection.
+
+**Running it a second time:** the pipeline only needs to run once. Qdrant keeps its data in a Docker volume, and the DuckDB file stays in `data/processed/`. Re-run it only after pulling new data, changing the cleaning logic, or deleting the Qdrant volume (`docker compose down -v`). After re-running `load_duckdb`, restart the API.
 
 ### Step 5: Run the app
 ```bash
@@ -188,7 +198,7 @@ streamlit run ui/streamlit_app.py           # UI: http://localhost:8501
 Check that everything is connected:
 ```bash
 curl localhost:8000/health
-# {"status":"healthy","ollama":"connected","qdrant":"connected","bigquery":"configured"}
+# {"status":"healthy","ollama":"connected","qdrant":"connected","duckdb":"connected"}
 
 curl -X POST localhost:8000/ask -H 'content-type: application/json' \
      -d '{"question": "What is the most common issue at JPMorgan Chase?"}'
@@ -204,7 +214,7 @@ pytest -m integration                       # tests against live Ollama / Qdrant
 ```bash
 docker compose --profile app up -d --build  # Qdrant + API + UI; uses Ollama on the host
 ```
-The API container needs a service-account key at `credentials/bigquery-key.json` for BigQuery, because `gcloud` login credentials aren't available inside the container.
+The API container mounts `data/processed/` read-only, so build the DuckDB file (`python -m ingestion.load_duckdb`) on the host first.
 
 ### Notebooks
 ```bash
@@ -215,107 +225,45 @@ The notebooks are for exploration. The production cleaning step is `ingestion/cl
 
 ---
 
-## BigQuery Setup
+## SQL Data (DuckDB)
 
-### Do I need to push the cleaned data to BigQuery?
-**Yes.** The SQL path (counts, rankings, trends) queries BigQuery directly, so the cleaned table must exist there. The RAG path doesn't need BigQuery: it reads narratives from Qdrant, which `embed_narratives.py` fills from the local Parquet file.
+The SQL path (counts, rankings, trends) queries a local DuckDB file, `data/processed/complaints.duckdb`. The RAG path doesn't use it: it reads narratives from Qdrant, which `embed_narratives.py` fills from the same Parquet file.
 
-- Push the **full cleaned dataset** (~322K rows, ~110 MB). Aggregations are only correct over all rows.
-- Load it with `python -m ingestion.load_bigquery`. **Don't** commit data to git or upload the CSVs by hand: the script sets the correct schema, partitioning and clustering.
-- The data is public CFPB data, and the CFPB already scrubs personal information from the narratives.
-- **Cost:** load jobs are free, and this size fits well inside BigQuery's free tier (10 GB storage, 1 TB of queries per month).
-
-### One-time setup (project owner)
-1. **Create or choose a GCP project** in the [Cloud Console](https://console.cloud.google.com/) and note the **project ID** (e.g. `complaint-insights-123456`).
-2. **Enable billing** on the project.
-   > ⚠️ Don't use the BigQuery *sandbox* (no billing). Sandbox tables and partitions expire after 60 days, and since this table is partitioned by `date_received`, older complaints would be deleted. With billing enabled you still stay in the free tier.
-3. **Enable the BigQuery API:**
-   ```bash
-   gcloud config set project YOUR_PROJECT_ID
-   gcloud services enable bigquery.googleapis.com
-   ```
-4. **Authenticate:**
-   ```bash
-   gcloud auth application-default login
-   ```
-5. **Set `.env`:**
-   ```bash
-   BIGQUERY_PROJECT_ID=YOUR_PROJECT_ID
-   BIGQUERY_DATASET=cfpb_complaints     # default
-   BIGQUERY_TABLE=complaints            # default
-   ```
-6. **Load the data:**
-   ```bash
-   python -m ingestion.clean
-   python -m ingestion.load_bigquery
-   ```
-   This creates:
-   | Object | Details |
-   |---|---|
-   | Dataset `cfpb_complaints` | Location `US` |
-   | Table `cfpb_complaints.complaints` | 16 columns, partitioned by month on `date_received`, clustered by `company, product` |
-   | Table `cfpb_complaints.company_aliases` | `alias → canonical_name` (e.g. `Chase → JPMORGAN CHASE & CO.`) |
-
-   Re-running the script **replaces** both tables (`WRITE_TRUNCATE`), so it's safe to re-run after new data is pulled.
-7. **Verify** in the BigQuery console or with `bq`:
-   ```bash
-   bq query --use_legacy_sql=false \
-     'SELECT product, COUNT(*) AS n FROM `cfpb_complaints.complaints` GROUP BY product'
-   # Expect: Credit card ≈ 246,212 and Mortgage ≈ 75,632
-
-   bq query --use_legacy_sql=false \
-     'SELECT issue, COUNT(*) AS n FROM `cfpb_complaints.complaints`
-      WHERE company = "JPMORGAN CHASE & CO." GROUP BY issue ORDER BY n DESC LIMIT 1'
-   # Expect: Problem with a purchase shown on your statement, 5571
-   ```
-
-### Giving teammates access
-The app runs queries as *the person or service account running it*, so each teammate needs two roles:
-
-| Role | Where | Why |
-|---|---|---|
-| **BigQuery Job User** (`roles/bigquery.jobUser`) | Project | Allows running query jobs |
-| **BigQuery Data Viewer** (`roles/bigquery.dataViewer`) | Dataset `cfpb_complaints` | Read-only access to the tables |
-| *BigQuery Data Editor* (`roles/bigquery.dataEditor`) | Dataset | **Only** for someone who will re-run `load_bigquery.py` |
-
-Grant them like this:
+### Build it
 ```bash
-# Project-level: run query jobs
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="user:teammate@example.com" --role="roles/bigquery.jobUser"
+python -m ingestion.clean         # if data/processed/complaints.parquet doesn't exist yet
+python -m ingestion.load_duckdb
 ```
-For dataset-level read access: BigQuery console → `cfpb_complaints` → **Sharing → Permissions → Add principal** → `teammate@example.com` → role **BigQuery Data Viewer**.
-
-Each teammate then:
-1. Runs `gcloud auth application-default login` with the account you granted.
-2. Sets `BIGQUERY_PROJECT_ID=YOUR_PROJECT_ID` in their `.env` (the **project that owns the table**, not their own project).
-3. Skips `load_bigquery.py`, since the table already exists.
-
-### Service account (for Docker or a deployed API)
-```bash
-gcloud iam service-accounts create complaint-insights-api
-SA=complaint-insights-api@YOUR_PROJECT_ID.iam.gserviceaccount.com
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
-# + grant BigQuery Data Viewer on the dataset to $SA (console → Sharing → Permissions)
-mkdir -p credentials
-gcloud iam service-accounts keys create credentials/bigquery-key.json --iam-account=$SA
-```
-Then set `GOOGLE_APPLICATION_CREDENTIALS=./credentials/bigquery-key.json` in `.env`. `credentials/` is gitignored, so **never commit the key**.
-
-### Changing dataset or table names
-Names are configured in **`.env` only**; nothing else needs editing:
-
-| Setting | Used by |
+This creates:
+| Table | Details |
 |---|---|
-| `BIGQUERY_PROJECT_ID` | Loader + SQL tool (the project queries run in) |
-| `BIGQUERY_DATASET` | Loader (creates it) + SQL prompt (`` `dataset.table` ``) |
-| `BIGQUERY_TABLE` | Loader + SQL prompt |
+| `complaints` | All ~322K cleaned rows, 16 columns |
+| `company_aliases` | `alias → canonical_name` (e.g. `Chase → JPMORGAN CHASE & CO.`) |
 
-Hard-coded values you may want to change:
-- The alias table name `company_aliases` and the alias list: `ingestion/load_bigquery.py` (`ALIASES_TABLE`, `COMPANY_ALIASES`).
-- Dataset location `US`: `create_dataset()` in `ingestion/load_bigquery.py`.
+Re-running **replaces** the file, so it's safe to re-run after new data is pulled. The data files are gitignored; never commit them.
+
+### Verify
+```bash
+python -c "import duckdb; c = duckdb.connect('data/processed/complaints.duckdb', read_only=True); \
+print(c.sql('SELECT product, COUNT(*) n FROM complaints GROUP BY product'))"
+# Expect: Credit card = 246,212 and Mortgage = 75,632
+```
+Expected top issue at JPMorgan Chase: *Problem with a purchase shown on your statement*, 5,571.
+
+### How queries are kept safe
+1. **Guardrails** in `validate_sql`: a single `SELECT`/`WITH` statement, no DDL/DML keywords, and a `LIMIT` capped at `SQL_MAX_ROWS`.
+2. **Read-only connection** with external access disabled and the configuration locked, so a query can't write, read local files or URLs, load extensions, or turn these settings back on.
+3. **`EXPLAIN` check** before running; a failure (e.g. an unknown column) goes back to the LLM for one retry.
+4. **Timeout**: queries running longer than `SQL_TIMEOUT_SECONDS` are interrupted.
+
+### Sharing with teammates
+The file is local. Teammates either run `clean` + `load_duckdb` themselves (they need `data/raw/*.csv`, or `pull_cfpb`), or you send them `complaints.parquet` and they run only `load_duckdb`. If you later need one shared copy in the cloud, MotherDuck (hosted DuckDB) runs the same SQL; the change is mostly the connection string in `app/sql_tool.py`.
+
+### Changing table names or columns
+- `DUCKDB_PATH` and `SQL_TABLE` in `.env` set the file and table used by the loader, SQL tool and SQL prompt.
+- The alias list: `COMPANY_ALIASES` in `ingestion/load_duckdb.py`.
 - The schema description and example company names in the SQL prompt: `app/prompts/sql.py`. Update these if you add columns or products.
-- If you change the cleaned columns, keep `FINAL_COLUMNS` in `ingestion/clean.py`, `COMPLAINTS_SCHEMA` in `ingestion/load_bigquery.py` and the prompt schema in sync.
+- If you change the cleaned columns, keep `FINAL_COLUMNS` in `ingestion/clean.py`, `COMPLAINTS_SCHEMA` in `ingestion/load_duckdb.py` and the prompt schema in sync (a unit test checks the first two match).
 
 ---
 
@@ -337,9 +285,7 @@ All settings come from `.env` (template: `.env.example`) and are read in `app/co
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BIGQUERY_PROJECT_ID` | none | GCP project for BigQuery; the SQL path is disabled if unset |
-| `BIGQUERY_DATASET` / `BIGQUERY_TABLE` | `cfpb_complaints` / `complaints` | Table queried by the SQL tool |
-| `GOOGLE_APPLICATION_CREDENTIALS` | none | Service-account key path (optional when using `gcloud` login) |
+| `DUCKDB_PATH` / `SQL_TABLE` | `data/processed/complaints.duckdb` / `complaints` | Database file (relative to the project root) and table queried by the SQL tool |
 | `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_COLLECTION_NAME` | `localhost` / `6333` / `complaint_narratives` | Vector store |
 | `OLLAMA_HOST` / `OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:7b-instruct` | LLM |
 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT_SECONDS` | `0.1` / `1000` / `120` | LLM generation |
@@ -352,7 +298,7 @@ All settings come from `.env` (template: `.env.example`) and are read in `app/co
 ## Testing
 
 ```bash
-pytest                    # unit tests (offline: LLM, Qdrant, BigQuery are mocked)
+pytest                    # unit tests (offline: LLM and Qdrant mocked, throwaway DuckDB)
 pytest -m integration     # live tests against Ollama / Qdrant
 pytest -m ""              # everything
 ```
@@ -389,13 +335,13 @@ This measures:
 - [x] Download CFPB credit card and mortgage complaint data (`ingestion/pull_cfpb.py`)
 - [x] Exploratory data analysis (`notebooks/`)
 - [x] Clean and normalize to a unified schema (`ingestion/clean.py`)
-- [ ] Load into BigQuery with partitioning/clustering (script ready, **not yet run**)
-- [x] Company alias lookup table (loaded by `load_bigquery.py`)
+- [x] Load into DuckDB (`ingestion/load_duckdb.py`)
+- [x] Company alias lookup table (loaded by `load_duckdb.py`)
 
 ### Phase 2: SQL Path
 - [ ] Run Ollama locally with Qwen2.5 7B
 - [x] Text-to-SQL with schema injection
-- [x] Guardrails (SELECT-only, LIMIT enforcement, dry-run validation, retry)
+- [x] Guardrails (SELECT-only, LIMIT enforcement, read-only sandboxed connection, EXPLAIN validation, retry)
 - [ ] Validate on the test questions
 
 ### Phase 3: RAG Path
@@ -442,7 +388,7 @@ See the LICENSE file.
 
 ## Resume Summary
 
-> Built a hybrid LLM agent (LangGraph, Ollama, BigQuery, Qdrant) that answers natural-language questions over 320K CFPB complaints, routing between text-to-SQL and RAG; achieved X% answer accuracy on a 25-question eval set.
+> Built a hybrid LLM agent (LangGraph, Ollama, DuckDB, Qdrant) that answers natural-language questions over 320K CFPB complaints, routing between text-to-SQL and RAG; achieved X% answer accuracy on a 25-question eval set.
 
 ---
 
@@ -456,14 +402,11 @@ Work through these roughly in order. Items 1–6 get the full system running end
 - [ ] Commit the restructure on `feature/repo-structure` (`git add -A` also records the removal of the old `banking-qa-agent/` folder), then open a PR to `main`.
 
 ### 2. Install the missing tools
-- [ ] Docker Desktop, Ollama and the gcloud CLI (none are installed yet).
+- [ ] Docker Desktop and Ollama.
 - [ ] `ollama pull qwen2.5:7b-instruct`
 
-### 3. BigQuery (see [BigQuery Setup](#bigquery-setup))
-- [ ] Create or choose the GCP project, enable billing (not the sandbox) and the BigQuery API.
-- [ ] Set `BIGQUERY_PROJECT_ID` in `.env`.
-- [ ] Run `python -m ingestion.load_bigquery` and check the row counts with the verification queries.
-- [ ] Grant teammates Job User + Data Viewer; create a service account if you'll use Docker.
+### 3. SQL data (see [SQL Data (DuckDB)](#sql-data-duckdb))
+- [x] Run `python -m ingestion.load_duckdb` and check the row counts.
 
 ### 4. Qdrant / RAG
 - [ ] `docker compose up -d qdrant`
@@ -475,15 +418,14 @@ Work through these roughly in order. Items 1–6 get the full system running end
 - [ ] `pytest -m integration`. The live router tests show whether the router prompt (`app/prompts/router.py`) needs tuning for your model.
 
 ### 6. Evaluation
-- [ ] Improve `eval/questions.jsonl`. Several `expected_answer_contains` values are too generic to mean much (e.g. `["count", "number"]`). Replace them with real numbers or names from BigQuery (e.g. `"5571"`, `"Problem with a purchase shown on your statement"`).
+- [ ] Improve `eval/questions.jsonl`. Several `expected_answer_contains` values are too generic to mean much (e.g. `["count", "number"]`). Replace them with real numbers or names from the SQL data (e.g. `"5571"`, `"Problem with a purchase shown on your statement"`).
 - [ ] Add more hybrid questions (only 3 of 25 right now).
 - [ ] Run `python eval/run_eval.py`, record the metrics in this README, and fill in the X% in the resume summary.
 
 ### 7. Feature gaps in the code
-- [ ] **Use `company_aliases` in the SQL path.** It's loaded into BigQuery, but the SQL tool doesn't use it yet; the prompt relies on `UPPER(company) LIKE '%...%'` instead. Options: put the alias list in the SQL prompt, or teach the prompt to `JOIN` the alias table.
+- [ ] **Use `company_aliases` in the SQL path.** It's loaded into DuckDB, but the SQL tool doesn't use it yet; the prompt relies on `UPPER(company) LIKE '%...%'` instead. Options: put the alias list in the SQL prompt, or teach the prompt to `JOIN` the alias table.
 - [ ] **Hybrid filters:** `filters_from_sql_result` (`app/graph.py`) only picks up exact `company = '...'` conditions and the top result row. Queries that use `LIKE` produce no company filter.
-- [ ] **`/health` for BigQuery** only checks that a project is configured. Add a real check, e.g. a dry-run `SELECT 1`.
-- [ ] **`/feedback`** only logs. Store it somewhere (a BigQuery table or a local SQLite/CSV file).
+- [ ] **`/feedback`** only logs. Store it somewhere (e.g. a separate local DuckDB/SQLite file or CSV; the main database is opened read-only).
 - [ ] **Narratives in hybrid answers:** the SQL result rows and narratives go into one prompt. Check that long contexts don't overflow the model's context window (`MAX_SQL_ROWS_IN_CONTEXT` and `MAX_NARRATIVE_CHARS` in `app/llm.py`).
 - [ ] **Streaming responses**, so the UI shows the answer as it's generated rather than after a long spinner.
 
@@ -492,4 +434,4 @@ Work through these roughly in order. Items 1–6 get the full system running end
 - [ ] Add GitHub Actions CI running `ruff check .`, `ruff format --check .` and `pytest` on every PR.
 - [ ] Re-run the notebooks so their saved outputs show the new paths (the outputs are still from before the restructure).
 - [ ] Optionally make the notebooks import functions from `ingestion/clean.py` instead of duplicating the cleaning logic.
-- [ ] Schedule `pull_cfpb → clean → load_bigquery → embed_narratives` to refresh the data (e.g. monthly).
+- [ ] Schedule `pull_cfpb → clean → load_duckdb → embed_narratives` to refresh the data (e.g. monthly).

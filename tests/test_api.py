@@ -45,12 +45,15 @@ def test_health_reports_each_service(client, monkeypatch):
     monkeypatch.setattr(
         "app.main.get_rag_tool", lambda: type("R", (), {"is_available": lambda s: False})()
     )
+    monkeypatch.setattr(
+        "app.main.get_sql_tool", lambda: type("S", (), {"is_available": lambda s: True})()
+    )
 
     data = client.get("/health").json()
     assert data["ollama"] == "connected"
     assert data["qdrant"] == "unavailable"
+    assert data["duckdb"] == "connected"
     assert data["status"] == "degraded"
-    assert "bigquery" in data
 
 
 def test_ask_returns_graph_answer(client, fake_graph):

@@ -11,6 +11,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 CLEANED_COMPLAINTS_PATH = PROCESSED_DIR / "complaints.parquet"
+DEFAULT_DUCKDB_PATH = PROCESSED_DIR / "complaints.duckdb"
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -19,9 +20,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 class Settings:
     """Runtime settings. Defaults match .env.example."""
 
-    bigquery_project_id: str | None = os.getenv("BIGQUERY_PROJECT_ID") or None
-    bigquery_dataset: str = os.getenv("BIGQUERY_DATASET", "cfpb_complaints")
-    bigquery_table: str = os.getenv("BIGQUERY_TABLE", "complaints")
+    # Relative paths are resolved against the project root.
+    duckdb_path: Path = PROJECT_ROOT / os.getenv("DUCKDB_PATH", str(DEFAULT_DUCKDB_PATH))
+    sql_table: str = os.getenv("SQL_TABLE", "complaints")
 
     qdrant_host: str = os.getenv("QDRANT_HOST", "localhost")
     qdrant_port: int = int(os.getenv("QDRANT_PORT", "6333"))
