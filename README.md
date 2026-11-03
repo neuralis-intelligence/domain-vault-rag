@@ -100,7 +100,9 @@ domain-vault-rag/
 │
 ├── eval/
 │   ├── questions.jsonl         # 25 questions (13 sql, 9 rag, 3 hybrid) with expected routes
-│   └── run_eval.py             # Routing accuracy / answer quality / latency
+│   ├── run_eval.py             # Compare models: routing, SQL/answer correctness, latency
+│   ├── scoring.py              # Fact matching against reference SQL results
+│   └── results/                # run_<timestamp>.csv + latest.csv (gitignored)
 │
 └── tests/                      # Offline unit tests + opt-in integration tests
 ```
@@ -108,6 +110,10 @@ domain-vault-rag/
 ---
 
 ## Recent Changes
+
+### Model evaluation
+- `python -m eval.run_eval` compares every installed model on the question set, with ground truth from reference SQL instead of keyword matching, and saves runs to `eval/results/`.
+- New **Model evaluation** page in the UI: leaderboard, charts, per-question grid and side-by-side answers.
 
 ### UI refresh
 - The line-of-business and model pickers sit next to the message box, like a chat app's model menu.
@@ -231,7 +237,7 @@ curl -X POST localhost:8000/ask -H 'content-type: application/json' \
 
 ### Step 6: Evaluate and run the live tests
 ```bash
-python eval/run_eval.py                     # API must be running; writes eval/eval_results.csv
+python -m eval.run_eval                     # API must be running; compares every model, writes eval/results/
 pytest -m integration                       # tests against live Ollama / Qdrant
 ```
 
@@ -293,7 +299,7 @@ All five come from `data/processed/complaints.parquet`. Credit cards and mortgag
 LOBs whose source file doesn't exist yet are skipped by the loader and hidden in the UI (listed as "Not loaded yet").
 
 ### Choosing a model
-The **Model** picker next to the message box lists every installed Ollama chat model, smallest first. Install more with e.g. `ollama pull llama3.2` (3B, fast) or `ollama pull qwen2.5:7b-instruct` (better SQL). `ALLOWED_MODELS` in `.env` restricts the list; `MAX_MODEL_SIZE_GB` (default 10) hides larger models. Smaller models are faster but route and write SQL less reliably; use `python eval/run_eval.py --model <name>` to compare them.
+The **Model** picker next to the message box lists every installed Ollama chat model, smallest first. Install more with e.g. `ollama pull llama3.2` (3B, fast) or `ollama pull qwen2.5:7b-instruct` (better SQL). `ALLOWED_MODELS` in `.env` restricts the list; `MAX_MODEL_SIZE_GB` (default 10) hides larger models. Smaller models are faster but route and write SQL less reliably; use the [evaluation](#evaluation) to compare them.
 
 ---
 
@@ -374,16 +380,27 @@ See [tests/README.md](tests/README.md) for what each test file covers.
 
 ## Evaluation
 
-With the API running:
+Compares the local models on the 25 questions in `eval/questions.jsonl`. With the API running:
 
 ```bash
-python eval/run_eval.py   # --api-url, --questions, --output are optional
+python -m eval.run_eval                                   # every model in the picker (~7 min per 7B model)
+python -m eval.run_eval --models llama3.2:latest qwen2.5-coder:7b
+python -m eval.run_eval --limit 5                         # quick smoke test
+python -m eval.run_eval --rescore eval/results/latest.csv # re-score a saved run, no LLM calls
 ```
 
-This measures:
-- **Routing accuracy**: did the agent choose the expected tool?
-- **Answer quality**: does the answer contain the expected terms?
-- **Latency** and **error rate**, overall and per route
+Each model gets a warm-up question first, so loading it into memory isn't counted as answer time. Results are saved after each model to `eval/results/run_<timestamp>.csv` and `latest.csv`, and printed as a comparison table. The **Model evaluation** page in the UI shows the same results: a leaderboard, accuracy vs. speed, routing by question type, a ✓/✗ grid per question, and every model's answer side by side.
+
+| Metric | How it's measured |
+|---|---|
+| **Answer correct** | Questions with a `reference_sql` (13 of 25): the eval runs it on DuckDB and checks the written answer states those facts. Company names match without legal suffixes (`Capital One` = `CAPITAL ONE FINANCIAL CORPORATION`), counts must match exactly, other numbers allow rounding and fraction/percent, long category names may be paraphrased (≥75% of their words) |
+| **SQL correct** | The model's SQL result contains the reference facts, whatever the column names |
+| **Routing** | The chosen route (sql / rag / hybrid) equals `expected_route` |
+| **Cites sources** | Text-search answers mention at least one retrieved record ID |
+| **Keyword match** | The original rough check against `expected_answer_contains` (kept for comparison) |
+| **Latency** | Median and p90 seconds per question, plus model load time |
+
+To add a question, append a line to `questions.jsonl` with `question`, `lob`, `expected_route`, and, where there is one right answer, `reference_sql` (use `{table}` for the LOB's table; add `"check": "first_column"` when every row's first value should appear, e.g. a top-5 list). Ground truth is computed from the current data on every run, so it stays right after a data refresh.
 
 ---
 
@@ -487,7 +504,8 @@ Work through these roughly in order. Items 1–6 get the full system running end
 ### 6. Evaluation
 - [ ] Improve `eval/questions.jsonl`. Several `expected_answer_contains` values are too generic to mean much (e.g. `["count", "number"]`). Replace them with real numbers or names from the SQL data (e.g. `"5571"`, `"Problem with a purchase shown on your statement"`).
 - [ ] Add more hybrid questions (only 3 of 25 right now).
-- [ ] Run `python eval/run_eval.py`, record the metrics in this README, and fill in the X% in the resume summary.
+- [ ] Run `python -m eval.run_eval`, record the metrics in this README, and fill in the X% in the resume summary.
+- [ ] Add `reference_sql` to more questions (12 of 25 are scored on routing only) and add questions for the student loan, vehicle loan and checking & savings LOBs.
 
 ### 7. Feature gaps in the code
 - [ ] **Line-of-business agent:** classify which LOB a question is about (e.g. an LLM call over the LOB names/descriptions in `lobs.toml`, or embedding similarity to each LOB's example questions) and pre-select it, keeping the user's pick as an override. `/ask` already accepts `lob`, so the classifier only has to fill it in.

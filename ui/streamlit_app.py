@@ -5,6 +5,7 @@ Streamlit UI for the Complaint Insights Agent.
   the message box, per question
 - Answers show the route, dataset, model and response time, with the SQL result
   (chart / table / query) and the matching texts in collapsible sections
+- A second page, "Model evaluation" (ui/eval_page.py), compares the models
 """
 
 import os
@@ -373,4 +374,17 @@ def main() -> None:
     st.session_state.messages.append(message)
 
 
-main()
+if __name__ == "__main__":
+    import eval_page  # ui/ is on the path when Streamlit runs this file
+
+    st.navigation(
+        [
+            st.Page(main, title="Chat", icon=":material/forum:", default=True),
+            st.Page(
+                eval_page.render,
+                title="Model evaluation",
+                icon=":material/leaderboard:",
+                url_path="evaluation",
+            ),
+        ]
+    ).run()
