@@ -2,7 +2,8 @@
 LLM client for interacting with Ollama.
 
 Handles:
-- Connection to the Ollama HTTP API
+- Connection to the Ollama HTTP API, one cached client per model
+- Listing the installed models the user can choose from
 - Prompt formatting
 - Answer synthesis from SQL / RAG results
 """
@@ -13,9 +14,18 @@ from typing import Any
 import requests
 
 from app.config import settings
+from app.lob import LineOfBusiness, get_lob
 from app.prompts.synthesis import get_synthesis_prompt
 
 logger = logging.getLogger(__name__)
+
+# Model families that only produce embeddings and can't answer questions.
+_EMBEDDING_FAMILIES = {"bert", "nomic-bert"}
+
+
+class ModelNotAvailableError(ValueError):
+    """Raised when a request names a model that isn't installed or allowed."""
+
 
 # Keep the synthesis context small enough for a 7B model's context window.
 MAX_SQL_ROWS_IN_CONTEXT = 50
@@ -103,20 +113,70 @@ class OllamaClient:
             return False
 
 
-_llm_client: OllamaClient | None = None
+_llm_clients: dict[str, OllamaClient] = {}
 
 
-def get_llm_client() -> OllamaClient:
-    """Get or create the shared LLM client."""
-    global _llm_client
-    if _llm_client is None:
-        _llm_client = OllamaClient()
-    return _llm_client
+def get_llm_client(model: str | None = None) -> OllamaClient:
+    """Get or create the shared client for `model` (default: OLLAMA_MODEL)."""
+    model = model or settings.ollama_model
+    if model not in _llm_clients:
+        _llm_clients[model] = OllamaClient(model=model)
+    return _llm_clients[model]
+
+
+def list_models() -> list[dict[str, Any]]:
+    """
+    Installed Ollama chat models the user may pick, smallest first.
+
+    Embedding-only models are left out. If ALLOWED_MODELS is set only those are offered;
+    otherwise every model up to MAX_MODEL_SIZE_GB on disk.
+
+    Raises:
+        requests.RequestException: if Ollama is unreachable.
+    """
+    response = requests.get(f"{settings.ollama_host.rstrip('/')}/api/tags", timeout=5)
+    response.raise_for_status()
+
+    models = []
+    for m in response.json().get("models", []):
+        details = m.get("details") or {}
+        families = set(details.get("families") or [details.get("family")])
+        size_gb = round(m.get("size", 0) / 1e9, 1)
+        if families & _EMBEDDING_FAMILIES or "embed" in m["name"]:
+            continue
+        if settings.allowed_models:
+            if m["name"] not in settings.allowed_models:
+                continue
+        elif size_gb > settings.max_model_size_gb:
+            continue
+        models.append(
+            {
+                "name": m["name"],
+                "size_gb": size_gb,
+                "parameter_size": details.get("parameter_size"),
+                "family": details.get("family"),
+                "quantization": details.get("quantization_level"),
+            }
+        )
+    return sorted(models, key=lambda m: m["size_gb"])
+
+
+def resolve_model(model: str | None) -> str:
+    """Return `model` (or the default) if it can be used, else raise ModelNotAvailableError."""
+    model = model or settings.ollama_model
+    available = [m["name"] for m in list_models()]
+    if model not in available:
+        raise ModelNotAvailableError(
+            f"Model {model!r} is not available. Installed: {', '.join(available) or 'none'}. "
+            f"Install it with `ollama pull {model}`."
+        )
+    return model
 
 
 def build_context(
     sql_result: dict[str, Any] | None = None,
     rag_result: dict[str, Any] | None = None,
+    doc_label: str = "Record",
 ) -> str:
     """Format SQL rows and RAG narratives into a plain-text context block."""
     parts: list[str] = []
@@ -132,13 +192,13 @@ def build_context(
 
     if rag_result:
         documents = rag_result.get("documents", [])
-        parts.append(f"\nRelevant complaint narratives ({len(documents)}):")
+        parts.append(f"\nRelevant {doc_label.lower()} texts ({len(documents)}):")
         for doc in documents:
-            narrative = (doc.get("narrative") or "")[:MAX_NARRATIVE_CHARS]
-            parts.append(
-                f"- [Complaint {doc.get('complaint_id')}] {doc.get('company')} / "
-                f"{doc.get('issue')}: {narrative}"
+            text = (doc.get("text") or "")[:MAX_NARRATIVE_CHARS]
+            fields = " / ".join(
+                str(v) for k, v in (doc.get("fields") or {}).items() if v and k != "date_received"
             )
+            parts.append(f"- [{doc_label} {doc.get('id')}] {fields}: {text}")
 
     return "\n".join(parts) if parts else "No data was retrieved."
 
@@ -148,8 +208,19 @@ def synthesize_answer(
     sql_result: dict[str, Any] | None = None,
     rag_result: dict[str, Any] | None = None,
     route: str = "unknown",
+    lob: LineOfBusiness | None = None,
+    model: str | None = None,
 ) -> str:
     """Synthesize a natural-language answer from SQL and/or RAG results."""
-    context = build_context(sql_result, rag_result)
-    prompt = get_synthesis_prompt(question, context, route)
-    return get_llm_client().generate(prompt)
+    lob = lob or get_lob()
+    doc_label = lob.rag.doc_label if lob.rag else "Record"
+    context = build_context(sql_result, rag_result, doc_label=doc_label)
+    prompt = get_synthesis_prompt(
+        question,
+        context,
+        route,
+        dataset=lob.name,
+        doc_label=doc_label,
+        has_text=lob.rag is not None,
+    )
+    return get_llm_client(model).generate(prompt)

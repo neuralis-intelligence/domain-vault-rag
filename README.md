@@ -1,6 +1,6 @@
 # Complaint Insights Agent
 
-A hybrid LLM agent that answers natural-language questions about CFPB bank complaints (credit cards and mortgages) using local open-source models. The agent routes each question to text-to-SQL, RAG, or both, and returns a grounded answer.
+A hybrid LLM agent that answers natural-language questions about financial data using local open-source models. The user picks a **line of business** (credit cards, mortgages, student loans, vehicle loans, checking & savings, or their own dataset) and a **local model**; the agent routes each question to text-to-SQL, RAG, or both, and returns a grounded answer.
 
 **Example:** "What is the most recurring issue at JPMorgan?" → *"Problem with a purchase shown on your statement" (5,571 complaints)*
 
@@ -22,10 +22,13 @@ Two kinds of questions need different tools:
 | What customers say | "What do people complain about in Chase fraud cases?" | **RAG** on complaint narratives |
 | Hybrid | "Top issue at JPMorgan and what are people saying?" | SQL first, then RAG filtered by the SQL result |
 
-An LLM **router** (LangGraph) picks the path for each question.
+An LLM **router** (LangGraph) picks the path for each question. Every step runs against the **line of business (LOB)** and the **model** the user chose:
+
+- **Line of business** → which DuckDB table the SQL is written for, which columns and values the SQL prompt describes, and which Qdrant collection/filter the RAG search uses. LOBs are defined in [`config/lobs.toml`](config/lobs.toml). For now the user picks the LOB; a classifier agent can pick it later (see the roadmap).
+- **Model** → the Ollama model used for routing, SQL generation and the answer. The UI lists every installed chat model, like the model menu in a chat app.
 
 ```
-User → Streamlit UI → FastAPI /ask → LangGraph
+User (question + LOB + model) → Streamlit UI → FastAPI /ask → LangGraph
                                       ├── route (LLM: sql | rag | hybrid)
                                       ├── sql:    LLM → SQL → guardrails → EXPLAIN → DuckDB
                                       ├── rag:    embed question → Qdrant search (+ metadata filters)
@@ -66,7 +69,8 @@ domain-vault-rag/
 │
 ├── app/                        # FastAPI backend + agent
 │   ├── config.py               # Project paths + settings (loads .env)
-│   ├── main.py                 # GET /, GET /health, POST /ask, POST /feedback
+│   ├── main.py                 # GET /, /health, /models, /lobs; POST /ask, /feedback
+│   ├── lob.py                  # Line-of-business registry (loads config/lobs.toml)
 │   ├── graph.py                # LangGraph: route → sql/rag/hybrid → synthesize
 │   ├── router.py               # LLM query classification
 │   ├── sql_tool.py             # DuckDB text-to-SQL with guardrails
@@ -77,8 +81,11 @@ domain-vault-rag/
 ├── ingestion/                  # ETL pipeline, run in this order
 │   ├── pull_cfpb.py            # 1. Download raw CSVs from the CFPB API
 │   ├── clean.py                # 2. Clean + unify → data/processed/complaints.parquet
-│   ├── load_duckdb.py          # 3. Build the DuckDB file + company_aliases
-│   └── embed_narratives.py     # 4. Embed narratives into Qdrant
+│   ├── load_duckdb.py          # 3. Build the DuckDB file: one table per LOB
+│   └── embed_narratives.py     # 4. Embed each LOB's text into Qdrant
+│
+├── config/
+│   └── lobs.toml               # Lines of business: data source, table, prompt hints, RAG settings
 │
 ├── data/                       # Contents are gitignored (only .gitkeep is tracked)
 │   ├── raw/                    # credit_card.csv, mortgage.csv
@@ -93,7 +100,9 @@ domain-vault-rag/
 │
 ├── eval/
 │   ├── questions.jsonl         # 25 questions (13 sql, 9 rag, 3 hybrid) with expected routes
-│   └── run_eval.py             # Routing accuracy / answer quality / latency
+│   ├── run_eval.py             # Compare models: routing, SQL/answer correctness, latency
+│   ├── scoring.py              # Fact matching against reference SQL results
+│   └── results/                # run_<timestamp>.csv + latest.csv (gitignored)
 │
 └── tests/                      # Offline unit tests + opt-in integration tests
 ```
@@ -101,6 +110,23 @@ domain-vault-rag/
 ---
 
 ## Recent Changes
+
+### Model evaluation
+- `python -m eval.run_eval` compares every installed model on the question set, with ground truth from reference SQL instead of keyword matching, and saves runs to `eval/results/`.
+- New **Model evaluation** page in the UI: leaderboard, charts, per-question grid and side-by-side answers.
+
+### UI refresh
+- The line-of-business and model pickers sit next to the message box, like a chat app's model menu.
+- A new chat shows example questions as chips. Answers show badges (route, dataset, model, time), and the data (chart / table / SQL) and sources are in collapsible sections.
+- Light theme in `.streamlit/config.toml`; it follows the system dark mode.
+
+### Lines of business + model picker
+- **Choose the dataset:** `config/lobs.toml` defines five CFPB lines of business (credit cards, mortgages, student loans, vehicle loans, checking & savings), each its own DuckDB table, plus a template for adding your own Parquet datasets with different columns. `/ask` takes `"lob"`; the UI has a picker.
+- **Schema-aware SQL prompt:** the prompt now lists the chosen table's real columns, types, value lists (e.g. every `issue` in that LOB) and date ranges, read from DuckDB, instead of hard-coded credit card/mortgage values. That's what lets a new dataset work without writing a prompt.
+- **Choose the model:** `GET /models` lists installed Ollama chat models (embedding models and anything over `MAX_MODEL_SIZE_GB` are hidden; `ALLOWED_MODELS` sets an allowlist). `/ask` takes `"model"`; the UI has a picker and shows which model answered.
+- **RAG per LOB:** each LOB names its Qdrant collection and a fixed filter. The CFPB LOBs share `complaint_narratives` filtered by `product`, so the existing embeddings are reused; `embed_narratives --lob <id>` embeds a new LOB and skips points that already exist.
+- `pull_cfpb --products ...` and `clean` handle any CFPB product listed in `CFPB_PRODUCTS`.
+- Removed settings: `SQL_TABLE`, `QDRANT_COLLECTION_NAME` (both now per LOB in `lobs.toml`).
 
 ### SQL backend: BigQuery → DuckDB
 The BigQuery sandbox deleted the loaded data after 60 days, and keeping it would have needed a billing account. The SQL path now runs on a local DuckDB file instead: free, no account, no expiry, and faster at this size.
@@ -179,13 +205,14 @@ ollama pull qwen2.5:7b-instruct             # ~4.7 GB, one-time
 
 ### Step 4: Run the data pipeline
 ```bash
-python -m ingestion.pull_cfpb                       # optional: re-download data/raw/*.csv (slow, rate-limited)
+python -m ingestion.pull_cfpb                       # optional: (re-)download data/raw/*.csv (slow, rate-limited)
+                                                    #   one product: --products student_loan
 python -m ingestion.clean                           # → data/processed/complaints.parquet (~5 s)
-python -m ingestion.load_duckdb                     # → data/processed/complaints.duckdb (~10 s)
-python -m ingestion.embed_narratives --limit 2000   # quick test sample
-python -m ingestion.embed_narratives                # all ~147K narratives (long on CPU)
+python -m ingestion.load_duckdb                     # → data/processed/complaints.duckdb, one table per LOB
+python -m ingestion.embed_narratives --lob mortgage --limit 2000   # quick test sample
+python -m ingestion.embed_narratives                # every LOB; skips texts already in Qdrant
 ```
-Add `--recreate` to `embed_narratives` to drop and rebuild the Qdrant collection.
+`embed_narratives` options: `--lob <id> ...` to embed only some LOBs, `--force` to re-embed existing points, `--recreate` to drop and rebuild their collections (refused if another LOB shares the collection and isn't included).
 
 **Running it a second time:** the pipeline only needs to run once. Qdrant keeps its data in a Docker volume, and the DuckDB file stays in `data/processed/`. Re-run it only after pulling new data, changing the cleaning logic, or deleting the Qdrant volume (`docker compose down -v`). After re-running `load_duckdb`, restart the API.
 
@@ -200,13 +227,17 @@ Check that everything is connected:
 curl localhost:8000/health
 # {"status":"healthy","ollama":"connected","qdrant":"connected","duckdb":"connected"}
 
+curl localhost:8000/lobs      # lines of business and how many rows each has loaded
+curl localhost:8000/models    # installed models you can pick
+
 curl -X POST localhost:8000/ask -H 'content-type: application/json' \
-     -d '{"question": "What is the most common issue at JPMorgan Chase?"}'
+     -d '{"question": "What is the most common issue at JPMorgan Chase?", "lob": "credit_card", "model": "llama3.2:latest"}'
 ```
+`lob` and `model` are optional; they default to `default_lob` in `lobs.toml` and `OLLAMA_MODEL`.
 
 ### Step 6: Evaluate and run the live tests
 ```bash
-python eval/run_eval.py                     # API must be running; writes eval/eval_results.csv
+python -m eval.run_eval                     # API must be running; compares every model, writes eval/results/
 pytest -m integration                       # tests against live Ollama / Qdrant
 ```
 
@@ -225,57 +256,97 @@ The notebooks are for exploration. The production cleaning step is `ingestion/cl
 
 ---
 
+## Lines of Business
+
+A line of business (LOB) is one dataset the user can ask about. Each `[lobs.<id>]` entry in [`config/lobs.toml`](config/lobs.toml) says:
+
+| Key | Meaning |
+|---|---|
+| `name`, `description` | Shown in the UI and given to the LLM |
+| `source` | Parquet file (or glob) the table is built from, relative to the project root |
+| `where` | Optional row filter, e.g. `product = 'Mortgage'` |
+| `table` | DuckDB table name |
+| `profile` | Optional shared defaults; `cfpb_complaints` supplies column descriptions, SQL examples and RAG settings for CFPB data |
+| `columns`, `value_columns`, `prompt_notes`, `sql_examples` | Optional hints for the SQL prompt |
+| `example_questions` | Buttons in the UI sidebar |
+| `[rag]` | Optional: `collection`, `text_column`, `id_column`, `payload_fields`, `filter_fields`, `filter`. Without it the LOB is SQL-only and the router is skipped |
+
+The CFPB lines of business:
+
+| id | Table | Rows | Text search |
+|---|---|---|---|
+| `credit_card` | `credit_card_complaints` | ~246K | ✓ 108K narratives |
+| `mortgage` | `mortgage_complaints` | ~76K | ✓ 38K narratives |
+| `student_loan` | `student_loan_complaints` | ~60K | SQL only |
+| `vehicle_loan` | `vehicle_loan_complaints` | ~60K | SQL only |
+| `checking_savings` | `checking_savings_complaints` | ~231K | SQL only |
+
+All five come from `data/processed/complaints.parquet`. Credit cards and mortgages share the Qdrant collection `complaint_narratives`, each restricted to its own product.
+
+> ⚠️ **The CFPB no longer publishes complaint narratives.** As of 2026-11-02 the narrative column is gone from both the public API and the bulk `complaints.csv.zip`, even for old complaints. That's why the three newer products are SQL-only (`rag = false`). The credit card and mortgage narratives exist only in your `data/raw/credit_card.csv`, `data/raw/mortgage.csv` and the Qdrant volume, so **back these up**. `pull_cfpb` won't overwrite a raw file that has narratives with one that doesn't; it saves the new download as `<key>.no_narratives.csv` instead.
+
+### Adding a CFPB product
+1. Add it to `CFPB_PRODUCTS` in `ingestion/pull_cfpb.py` (key → the product name as the CFPB API spells it).
+2. Add a `[lobs.<key>]` entry with `profile = "cfpb_complaints"`, `where = "product = '...'"` and `rag.filter = { product = "..." }`.
+3. Run `pull_cfpb --products <key>`, `clean`, `load_duckdb`, then restart the API. New downloads have no narratives, so set `rag = false` in the entry (and skip `embed_narratives`).
+
+### Adding your own dataset
+1. Save it as Parquet, e.g. `data/processed/card_transactions.parquet`.
+2. Copy the commented template at the bottom of `lobs.toml` and fill in `name`, `source` and `table`. Everything else is optional: the SQL prompt already lists the table's columns, types and common values from the data. Column descriptions, `prompt_notes` and one or two `sql_examples` noticeably improve the SQL a small model writes.
+3. Run `python -m ingestion.load_duckdb`. If you added a `[rag]` block, also run `python -m ingestion.embed_narratives --lob <id>`.
+4. Restart the API. The new LOB appears in the UI picker.
+
+LOBs whose source file doesn't exist yet are skipped by the loader and hidden in the UI (listed as "Not loaded yet").
+
+### Choosing a model
+The **Model** picker next to the message box lists every installed Ollama chat model, smallest first. Install more with e.g. `ollama pull llama3.2` (3B, fast) or `ollama pull qwen2.5:7b-instruct` (better SQL). `ALLOWED_MODELS` in `.env` restricts the list; `MAX_MODEL_SIZE_GB` (default 10) hides larger models. Smaller models are faster but route and write SQL less reliably; use the [evaluation](#evaluation) to compare them.
+
+---
+
 ## SQL Data (DuckDB)
 
-The SQL path (counts, rankings, trends) queries a local DuckDB file, `data/processed/complaints.duckdb`. The RAG path doesn't use it: it reads narratives from Qdrant, which `embed_narratives.py` fills from the same Parquet file.
+The SQL path (counts, rankings, trends) queries a local DuckDB file, `data/processed/complaints.duckdb`, with one table per line of business. The RAG path doesn't use it: it reads text from Qdrant, which `embed_narratives.py` fills from the same Parquet files.
 
 ### Build it
 ```bash
 python -m ingestion.clean         # if data/processed/complaints.parquet doesn't exist yet
 python -m ingestion.load_duckdb
 ```
-This creates:
-| Table | Details |
-|---|---|
-| `complaints` | All ~322K cleaned rows, 16 columns |
-| `company_aliases` | `alias → canonical_name` (e.g. `Chase → JPMORGAN CHASE & CO.`) |
+This creates one table per LOB in `lobs.toml` (see [Lines of Business](#lines-of-business)) plus `company_aliases` (`alias → canonical_name`, e.g. `Chase → JPMORGAN CHASE & CO.`).
 
-Re-running **replaces** the file, so it's safe to re-run after new data is pulled. The data files are gitignored; never commit them.
+Re-running **replaces** the file, so it's safe to re-run after new data is pulled. Restart the API afterwards. The data files are gitignored; never commit them.
 
 ### Verify
 ```bash
+curl -s localhost:8000/lobs       # rows per LOB
 python -c "import duckdb; c = duckdb.connect('data/processed/complaints.duckdb', read_only=True); \
-print(c.sql('SELECT product, COUNT(*) n FROM complaints GROUP BY product'))"
-# Expect: Credit card = 246,212 and Mortgage = 75,632
+print(c.sql('SELECT COUNT(*) FROM credit_card_complaints'))"
+# Expect: 246,212
 ```
-Expected top issue at JPMorgan Chase: *Problem with a purchase shown on your statement*, 5,571.
+Expected top issue at JPMorgan Chase (credit cards): *Problem with a purchase shown on your statement*, 5,571.
 
 ### How queries are kept safe
-1. **Guardrails** in `validate_sql`: a single `SELECT`/`WITH` statement, no DDL/DML keywords, and a `LIMIT` capped at `SQL_MAX_ROWS`.
+1. **Guardrails** in `validate_sql`: a single `SELECT`/`WITH` statement, no DDL/DML keywords, and one `LIMIT` capped at `SQL_MAX_ROWS` (stacked `LIMIT`s are collapsed).
 2. **Read-only connection** with external access disabled and the configuration locked, so a query can't write, read local files or URLs, load extensions, or turn these settings back on.
 3. **`EXPLAIN` check** before running; a failure (e.g. an unknown column) goes back to the LLM for one retry.
 4. **Timeout**: queries running longer than `SQL_TIMEOUT_SECONDS` are interrupted.
 
+The `where` filters and table names in `lobs.toml` are trusted configuration (table names must be plain identifiers); only the generated SQL is treated as untrusted.
+
 ### Sharing with teammates
 The file is local. Teammates either run `clean` + `load_duckdb` themselves (they need `data/raw/*.csv`, or `pull_cfpb`), or you send them `complaints.parquet` and they run only `load_duckdb`. If you later need one shared copy in the cloud, MotherDuck (hosted DuckDB) runs the same SQL; the change is mostly the connection string in `app/sql_tool.py`.
-
-### Changing table names or columns
-- `DUCKDB_PATH` and `SQL_TABLE` in `.env` set the file and table used by the loader, SQL tool and SQL prompt.
-- The alias list: `COMPANY_ALIASES` in `ingestion/load_duckdb.py`.
-- The schema description and example company names in the SQL prompt: `app/prompts/sql.py`. Update these if you add columns or products.
-- If you change the cleaned columns, keep `FINAL_COLUMNS` in `ingestion/clean.py`, `COMPLAINTS_SCHEMA` in `ingestion/load_duckdb.py` and the prompt schema in sync (a unit test checks the first two match).
 
 ---
 
 ## Usage
 
-With everything running, open `http://localhost:8501` and ask questions like:
+With everything running, open `http://localhost:8501`, pick a **line of business** and a **model** in the two menus next to the message box, and ask questions like:
 
-- "What are the top 5 most common issues at Bank of America?" → SQL
-- "What are customers saying about unauthorized charges at Capital One?" → RAG
-- "What is the top mortgage issue at Wells Fargo and what are people saying about it?" → hybrid
+- Credit cards: "What are the top 5 most common issues at Bank of America?" → SQL
+- Credit cards: "What are customers saying about unauthorized charges at Capital One?" → RAG
+- Mortgages: "What is the top issue at Wells Fargo and what are people saying about it?" → hybrid
 
-The UI shows which route was taken, a table and chart for SQL results, and the matching complaint narratives with similarity scores.
+A new chat shows example questions for the chosen line of business as clickable chips. Each answer shows badges for the route, line of business, model and response time, a collapsible **Data** section (chart, table and the generated SQL) and a **Sources** section with the matching texts and similarity scores. The sidebar has **New chat** and the status of Ollama, Qdrant and DuckDB. The theme (accent color, corners) is in `.streamlit/config.toml` and follows the system light/dark setting.
 
 ---
 
@@ -285,9 +356,11 @@ All settings come from `.env` (template: `.env.example`) and are read in `app/co
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DUCKDB_PATH` / `SQL_TABLE` | `data/processed/complaints.duckdb` / `complaints` | Database file (relative to the project root) and table queried by the SQL tool |
-| `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_COLLECTION_NAME` | `localhost` / `6333` / `complaint_narratives` | Vector store |
-| `OLLAMA_HOST` / `OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:7b-instruct` | LLM |
+| `LOB_REGISTRY_PATH` | `config/lobs.toml` | Lines of business (tables, prompt hints and Qdrant collections are configured there) |
+| `DUCKDB_PATH` | `data/processed/complaints.duckdb` | Database file (relative to the project root) |
+| `QDRANT_HOST` / `QDRANT_PORT` | `localhost` / `6333` | Vector store |
+| `OLLAMA_HOST` / `OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:7b-instruct` | LLM server / default model |
+| `ALLOWED_MODELS` / `MAX_MODEL_SIZE_GB` | empty / `10` | Models offered in the picker: an allowlist, or every installed chat model up to this size |
 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT_SECONDS` | `0.1` / `1000` / `120` | LLM generation |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Must match the model used for ingestion |
 | `RAG_TOP_K` / `RAG_SCORE_THRESHOLD` | `5` / `0.5` | Number of narratives returned / minimum cosine similarity |
@@ -307,16 +380,27 @@ See [tests/README.md](tests/README.md) for what each test file covers.
 
 ## Evaluation
 
-With the API running:
+Compares the local models on the 25 questions in `eval/questions.jsonl`. With the API running:
 
 ```bash
-python eval/run_eval.py   # --api-url, --questions, --output are optional
+python -m eval.run_eval                                   # every model in the picker (~7 min per 7B model)
+python -m eval.run_eval --models llama3.2:latest qwen2.5-coder:7b
+python -m eval.run_eval --limit 5                         # quick smoke test
+python -m eval.run_eval --rescore eval/results/latest.csv # re-score a saved run, no LLM calls
 ```
 
-This measures:
-- **Routing accuracy**: did the agent choose the expected tool?
-- **Answer quality**: does the answer contain the expected terms?
-- **Latency** and **error rate**, overall and per route
+Each model gets a warm-up question first, so loading it into memory isn't counted as answer time. Results are saved after each model to `eval/results/run_<timestamp>.csv` and `latest.csv`, and printed as a comparison table. The **Model evaluation** page in the UI shows the same results: a leaderboard, accuracy vs. speed, routing by question type, a ✓/✗ grid per question, and every model's answer side by side.
+
+| Metric | How it's measured |
+|---|---|
+| **Answer correct** | Questions with a `reference_sql` (13 of 25): the eval runs it on DuckDB and checks the written answer states those facts. Company names match without legal suffixes (`Capital One` = `CAPITAL ONE FINANCIAL CORPORATION`), counts must match exactly, other numbers allow rounding and fraction/percent, long category names may be paraphrased (≥75% of their words) |
+| **SQL correct** | The model's SQL result contains the reference facts, whatever the column names |
+| **Routing** | The chosen route (sql / rag / hybrid) equals `expected_route` |
+| **Cites sources** | Text-search answers mention at least one retrieved record ID |
+| **Keyword match** | The original rough check against `expected_answer_contains` (kept for comparison) |
+| **Latency** | Median and p90 seconds per question, plus model load time |
+
+To add a question, append a line to `questions.jsonl` with `question`, `lob`, `expected_route`, and, where there is one right answer, `reference_sql` (use `{table}` for the LOB's table; add `"check": "first_column"` when every row's first value should appear, e.g. a top-5 list). Ground truth is computed from the current data on every run, so it stays right after a data refresh.
 
 ---
 
@@ -420,9 +504,12 @@ Work through these roughly in order. Items 1–6 get the full system running end
 ### 6. Evaluation
 - [ ] Improve `eval/questions.jsonl`. Several `expected_answer_contains` values are too generic to mean much (e.g. `["count", "number"]`). Replace them with real numbers or names from the SQL data (e.g. `"5571"`, `"Problem with a purchase shown on your statement"`).
 - [ ] Add more hybrid questions (only 3 of 25 right now).
-- [ ] Run `python eval/run_eval.py`, record the metrics in this README, and fill in the X% in the resume summary.
+- [ ] Run `python -m eval.run_eval`, record the metrics in this README, and fill in the X% in the resume summary.
+- [ ] Add `reference_sql` to more questions (12 of 25 are scored on routing only) and add questions for the student loan, vehicle loan and checking & savings LOBs.
 
 ### 7. Feature gaps in the code
+- [ ] **Line-of-business agent:** classify which LOB a question is about (e.g. an LLM call over the LOB names/descriptions in `lobs.toml`, or embedding similarity to each LOB's example questions) and pre-select it, keeping the user's pick as an override. `/ask` already accepts `lob`, so the classifier only has to fill it in.
+- [ ] **Cross-LOB questions** ("credit card vs mortgage complaints at Chase"): today each question targets one table.
 - [ ] **Use `company_aliases` in the SQL path.** It's loaded into DuckDB, but the SQL tool doesn't use it yet; the prompt relies on `UPPER(company) LIKE '%...%'` instead. Options: put the alias list in the SQL prompt, or teach the prompt to `JOIN` the alias table.
 - [ ] **Hybrid filters:** `filters_from_sql_result` (`app/graph.py`) only picks up exact `company = '...'` conditions and the top result row. Queries that use `LIKE` produce no company filter.
 - [ ] **`/feedback`** only logs. Store it somewhere (e.g. a separate local DuckDB/SQLite file or CSV; the main database is opened read-only).

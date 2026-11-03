@@ -1,9 +1,11 @@
 """
 LangGraph workflow for routing and orchestrating SQL/RAG/hybrid queries.
 
-1. Router: classify the query as sql/rag/hybrid
-2. SQL tool: text-to-SQL on DuckDB
-3. RAG tool: semantic search on Qdrant
+Every step runs against the line of business (LOB) and the LLM the user chose.
+
+1. Router: classify the query as sql/rag/hybrid (always sql if the LOB has no text search)
+2. SQL tool: text-to-SQL on the LOB's DuckDB table
+3. RAG tool: semantic search on the LOB's Qdrant collection
 4. Hybrid: SQL first, then RAG filtered by the SQL result
 5. Synthesis: generate the final answer with the LLM
 """
@@ -15,7 +17,8 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, StateGraph
 
 from app.llm import synthesize_answer
-from app.rag_tool import FILTERABLE_FIELDS, execute_rag_query
+from app.lob import LineOfBusiness
+from app.rag_tool import execute_rag_query
 from app.router import route_query
 from app.sql_tool import execute_sql_query
 
@@ -28,6 +31,8 @@ class GraphState(TypedDict):
     """State passed through the LangGraph workflow."""
 
     question: str
+    lob: LineOfBusiness
+    model: str | None
     route: RouteType
     sql_result: dict[str, Any] | None
     rag_result: dict[str, Any] | None
@@ -35,7 +40,9 @@ class GraphState(TypedDict):
     metadata: dict[str, Any]
 
 
-def filters_from_sql_result(sql_result: dict[str, Any]) -> dict[str, str]:
+def filters_from_sql_result(
+    sql_result: dict[str, Any], filter_fields: tuple[str, ...]
+) -> dict[str, str]:
     """
     Derive RAG metadata filters from a SQL result.
 
@@ -47,12 +54,12 @@ def filters_from_sql_result(sql_result: dict[str, Any]) -> dict[str, str]:
 
     filters: dict[str, str] = {}
     for field, value in re.findall(r"\b(\w+)\s*=\s*'([^']*)'", sql_result.get("sql", "")):
-        if field.lower() in FILTERABLE_FIELDS:
+        if field.lower() in filter_fields:
             filters[field.lower()] = value
 
     rows = sql_result.get("results") or []
     if rows:
-        for field in FILTERABLE_FIELDS:
+        for field in filter_fields:
             value = rows[0].get(field)
             if isinstance(value, str) and value:
                 filters[field] = value
@@ -62,31 +69,36 @@ def filters_from_sql_result(sql_result: dict[str, Any]) -> dict[str, str]:
 
 def route_node(state: GraphState) -> dict[str, Any]:
     """Route the query to sql/rag/hybrid."""
-    route = route_query(state["question"])
+    lob = state["lob"]
+    if lob.rag is None:
+        route: RouteType = "sql"  # nothing to search semantically
+    else:
+        route = route_query(state["question"], model=state["model"], dataset=lob.name)
     logger.info("Route selected: %s", route)
     return {"route": route, "metadata": {**state["metadata"], "route": route}}
 
 
 def sql_node(state: GraphState) -> dict[str, Any]:
     """Execute the SQL path."""
-    return {"sql_result": execute_sql_query(state["question"])}
+    return {"sql_result": execute_sql_query(state["question"], state["lob"], state["model"])}
 
 
 def rag_node(state: GraphState) -> dict[str, Any]:
     """Execute the RAG path."""
-    return {"rag_result": execute_rag_query(state["question"])}
+    return {"rag_result": execute_rag_query(state["question"], state["lob"])}
 
 
 def hybrid_node(state: GraphState) -> dict[str, Any]:
     """Execute SQL, then RAG filtered by what SQL found."""
-    sql_result = execute_sql_query(state["question"])
-    filters = filters_from_sql_result(sql_result)
+    question, lob = state["question"], state["lob"]
+    sql_result = execute_sql_query(question, lob, state["model"])
+    filters = filters_from_sql_result(sql_result, lob.rag.filter_fields if lob.rag else ())
     logger.info("Hybrid RAG filters: %s", filters)
 
-    rag_result = execute_rag_query(state["question"], filters=filters or None)
+    rag_result = execute_rag_query(question, lob, filters=filters or None)
     if filters and not rag_result.get("documents"):
-        logger.info("No narratives matched the SQL filters; retrying unfiltered")
-        rag_result = execute_rag_query(state["question"])
+        logger.info("No texts matched the SQL filters; retrying unfiltered")
+        rag_result = execute_rag_query(question, lob)
 
     return {"sql_result": sql_result, "rag_result": rag_result}
 
@@ -98,6 +110,8 @@ def synthesize_node(state: GraphState) -> dict[str, Any]:
         sql_result=state.get("sql_result"),
         rag_result=state.get("rag_result"),
         route=state["route"],
+        lob=state["lob"],
+        model=state["model"],
     )
     return {"answer": answer}
 
@@ -131,10 +145,18 @@ class ComplaintInsightsGraph:
     def __init__(self):
         self.graph = build_graph()
 
-    async def run(self, question: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def run(
+        self,
+        question: str,
+        lob: LineOfBusiness,
+        model: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Run the full workflow and return the answer, route, and retrieved data."""
         initial_state = GraphState(
             question=question,
+            lob=lob,
+            model=model,
             route="sql",  # overwritten by the router
             sql_result=None,
             rag_result=None,

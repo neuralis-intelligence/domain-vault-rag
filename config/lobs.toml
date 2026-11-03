@@ -1,0 +1,126 @@
+# Lines of business (LOBs) the user can ask about.
+#
+# Each [lobs.<id>] entry is one dataset. The <id> is what the API (`"lob": "<id>"`) and the
+# UI use. After editing this file, rebuild the database and restart the API:
+#     python -m ingestion.load_duckdb
+#     python -m ingestion.embed_narratives --lob <id>     # only if the entry has a [rag] block
+#
+# `profile = "cfpb_complaints"` fills in the column descriptions, SQL examples and RAG
+# settings shared by every CFPB complaint product (see PROFILES in app/lob.py), so those
+# entries only set what differs. Any key set here overrides the profile.
+
+default_lob = "credit_card"
+
+# --- CFPB complaint products ------------------------------------------------------------
+# All built from the cleaned CFPB file, one table per product. Credit cards and mortgages
+# share one Qdrant collection of narratives, each kept to its own product by `rag.filter`.
+# The CFPB stopped publishing narrative text in its API and bulk export (seen 2026-11-02),
+# so products downloaded since then are SQL-only (`rag = false`).
+
+[lobs.credit_card]
+name = "Credit cards"
+description = "CFPB consumer complaints about credit cards"
+profile = "cfpb_complaints"
+source = "data/processed/complaints.parquet"
+where = "product = 'Credit card'"
+table = "credit_card_complaints"
+rag.filter = { product = "Credit card" }
+example_questions = [
+    "What is the most common issue at Bank of America?",
+    "Top 5 companies by complaint volume",
+    "What are customers saying about unauthorized charges at Capital One?",
+    "What is the top issue at JPMorgan and what are people saying about it?",
+]
+
+[lobs.mortgage]
+name = "Mortgages"
+description = "CFPB consumer complaints about mortgages"
+profile = "cfpb_complaints"
+source = "data/processed/complaints.parquet"
+where = "product = 'Mortgage'"
+table = "mortgage_complaints"
+rag.filter = { product = "Mortgage" }
+example_questions = [
+    "How many complaints did Wells Fargo receive each year?",
+    "What is the most common mortgage issue?",
+    "Show me examples of foreclosure complaints",
+    "What is the top issue at Rocket Mortgage and what are people saying about it?",
+]
+
+[lobs.student_loan]
+name = "Student loans"
+description = "CFPB consumer complaints about federal and private student loans"
+profile = "cfpb_complaints"
+source = "data/processed/complaints.parquet"
+where = "product = 'Student loan'"
+table = "student_loan_complaints"
+rag = false  # no narratives: the CFPB stopped publishing them before this was downloaded
+example_questions = [
+    "Which student loan servicers get the most complaints?",
+    "What is the most common issue with federal student loans?",
+    "How have student loan complaints changed by month?",
+]
+
+[lobs.vehicle_loan]
+name = "Vehicle loans"
+description = "CFPB consumer complaints about vehicle loans and leases"
+profile = "cfpb_complaints"
+source = "data/processed/complaints.parquet"
+where = "product = 'Vehicle loan or lease'"
+table = "vehicle_loan_complaints"
+rag = false  # no narratives: the CFPB stopped publishing them before this was downloaded
+example_questions = [
+    "Top 5 companies by vehicle loan complaints",
+    "How do loan complaints compare to lease complaints?",
+    "How many complaints are about repossession?",
+]
+
+[lobs.checking_savings]
+name = "Checking & savings"
+description = "CFPB consumer complaints about checking and savings accounts"
+profile = "cfpb_complaints"
+source = "data/processed/complaints.parquet"
+where = "product = 'Checking or savings account'"
+table = "checking_savings_complaints"
+rag = false  # no narratives: the CFPB stopped publishing them before this was downloaded
+example_questions = [
+    "Which banks have the most checking account complaints?",
+    "What is the most common issue with savings accounts?",
+    "Which banks get the most overdraft fee complaints?",
+]
+
+# --- Your own datasets ------------------------------------------------------------------
+# Template for a dataset with its own columns. Uncomment, point `source` at a Parquet file,
+# then run `python -m ingestion.load_duckdb`. The SQL prompt lists the table's columns,
+# types and common values automatically; `columns`, `prompt_notes` and `sql_examples`
+# are optional and improve the generated SQL.
+#
+# [lobs.card_transactions]
+# name = "Card transactions"
+# description = "Card transactions with merchant and dispute status"
+# source = "data/processed/card_transactions.parquet"   # a glob like "data/tx/*.parquet" works too
+# table = "card_transactions"
+# value_columns = ["merchant"]          # high-cardinality columns worth showing top values for
+# prompt_notes = "Amounts are in USD. A disputed transaction has dispute_status <> 'none'."
+# example_questions = ["Which merchants have the most disputes?"]
+#
+# [lobs.card_transactions.columns]      # optional column descriptions
+# amount = "Transaction amount in USD"
+# merchant = "Merchant name as printed on the statement"
+#
+# [[lobs.card_transactions.sql_examples]]
+# question = "Total disputed amount by month"
+# sql = """
+# SELECT date_trunc('month', posted_at) AS month, SUM(amount) AS disputed_amount
+# FROM {table}
+# WHERE dispute_status <> 'none'
+# GROUP BY month
+# ORDER BY month
+# """
+#
+# [lobs.card_transactions.rag]          # optional: free-text column for semantic search
+# collection = "card_transaction_notes" # its own Qdrant collection
+# text_column = "agent_notes"           # column to embed
+# id_column = "transaction_id"
+# payload_fields = ["merchant", "dispute_status", "posted_at"]
+# filter_fields = ["merchant", "dispute_status"]

@@ -1,13 +1,14 @@
 """Router prompt for query classification."""
 
 
-def get_router_prompt(question: str) -> str:
+def get_router_prompt(question: str, dataset: str = "") -> str:
     """
     Generate router prompt for classifying queries.
 
     Returns the appropriate route: sql, rag, or hybrid
     """
-    return f"""You are a query classifier for a complaint insights system. Analyze the user's question and classify it into one of three categories:
+    about = f" The user is asking about: {dataset}." if dataset else ""
+    return f"""You are a query classifier for a data insights system.{about} Analyze the user's question and classify it into one of three categories:
 
 **SQL**: Questions about counts, rankings, trends, aggregations, or statistics
 Examples:

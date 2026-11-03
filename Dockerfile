@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY app ./app
+COPY config ./config
 COPY ui ./ui
 
 EXPOSE 8000 8501

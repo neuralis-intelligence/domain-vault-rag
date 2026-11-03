@@ -2,7 +2,7 @@
 Data cleaning and schema normalization for CFPB complaint data.
 
 Mirrors the cleaning steps prototyped in notebooks/*_exploration.ipynb:
-- Load raw credit card and mortgage CSVs from data/raw/
+- Load every raw CFPB product CSV in data/raw/ (see CFPB_PRODUCTS in pull_cfpb.py)
 - Rename columns to snake_case
 - Parse dates, clean text fields and ZIP codes
 - Drop duplicate complaint IDs
@@ -18,10 +18,10 @@ from pathlib import Path
 import pandas as pd
 
 from app.config import CLEANED_COMPLAINTS_PATH, RAW_DIR
+from ingestion.pull_cfpb import CFPB_PRODUCTS
 
 logger = logging.getLogger(__name__)
 
-RAW_FILES = ("credit_card.csv", "mortgage.csv")
 
 COLUMN_MAPPING = {
     "Date received": "date_received",
@@ -59,7 +59,7 @@ TEXT_COLUMNS = (
     "tags",
 )
 
-# Final column order; must match COMPLAINTS_SCHEMA in load_duckdb.py.
+# Final column order of the cleaned complaints table.
 FINAL_COLUMNS = [
     "complaint_id",
     "date_received",
@@ -124,14 +124,19 @@ def clean_complaints(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_raw(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
-    """Load and concatenate all raw product CSVs."""
+    """Load and concatenate every raw product CSV that has been downloaded."""
     frames = []
-    for name in RAW_FILES:
-        path = raw_dir / name
+    for key in CFPB_PRODUCTS:
+        path = raw_dir / f"{key}.csv"
         if not path.exists():
-            raise FileNotFoundError(f"{path} not found. Run `python -m ingestion.pull_cfpb` first.")
+            logger.warning(
+                "%s not found, skipping (python -m ingestion.pull_cfpb --products %s)", path, key
+            )
+            continue
         logger.info("Loading %s", path)
         frames.append(pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[""]))
+    if not frames:
+        raise FileNotFoundError(f"No raw CSVs in {raw_dir}. Run `python -m ingestion.pull_cfpb`.")
     return pd.concat(frames, ignore_index=True)
 
 

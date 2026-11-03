@@ -1,0 +1,8 @@
+[theme]
+# Light/dark follows the viewer's system setting; only the accent and shapes are set here.
+primaryColor = "#2563eb"
+baseRadius = "0.6rem"
+showWidgetBorder = true
+
+[client]
+toolbarMode = "minimal"

@@ -37,7 +37,8 @@ def parse_route(response: str) -> RouteType:
     return DEFAULT_ROUTE
 
 
-def route_query(question: str) -> RouteType:
+def route_query(question: str, model: str | None = None, dataset: str = "") -> RouteType:
     """Classify a question into the sql/rag/hybrid route."""
-    response = get_llm_client().generate(get_router_prompt(question), temperature=0.0)
+    prompt = get_router_prompt(question, dataset=dataset)
+    response = get_llm_client(model).generate(prompt, temperature=0.0)
     return parse_route(response)

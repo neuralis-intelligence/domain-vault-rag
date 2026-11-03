@@ -1,13 +1,15 @@
 """
-Download CFPB credit card and mortgage complaints into data/raw/.
+Download CFPB complaints into data/raw/, one CSV per product.
 
 Pulls one month at a time from the CFPB public API (with 429 backoff) and writes
-data/raw/credit_card.csv and data/raw/mortgage.csv.
+data/raw/<key>.csv for each product in CFPB_PRODUCTS (e.g. data/raw/credit_card.csv).
 
 Usage (from the project root):
-    python -m ingestion.pull_cfpb
+    python -m ingestion.pull_cfpb                                   # every product
+    python -m ingestion.pull_cfpb --products student_loan vehicle_loan
 """
 
+import argparse
 import time
 from datetime import date, timedelta
 from io import BytesIO
@@ -16,6 +18,16 @@ import pandas as pd
 import requests
 
 from app.config import RAW_DIR
+
+# File key (data/raw/<key>.csv) -> product name exactly as the CFPB API spells it.
+# To add a product, add it here and to config/lobs.toml.
+CFPB_PRODUCTS = {
+    "credit_card": "Credit card",
+    "mortgage": "Mortgage",
+    "student_loan": "Student loan",
+    "vehicle_loan": "Vehicle loan or lease",
+    "checking_savings": "Checking or savings account",
+}
 
 # ---------------------------------------------------------
 # CFPB API configuration
@@ -170,39 +182,47 @@ def pull_product(product):
 # ---------------------------------------------------------
 
 
+NARRATIVE_COLUMN = "Consumer complaint narrative"
+
+
+def loses_narratives(path, new_df) -> bool:
+    """True if `path` holds narratives that writing `new_df` over it would throw away."""
+    if not path.exists() or NARRATIVE_COLUMN in new_df.columns:
+        return False
+    header = pd.read_csv(path, nrows=0).columns
+    return NARRATIVE_COLUMN in header
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Download CFPB complaints into data/raw/")
+    parser.add_argument(
+        "--products",
+        nargs="+",
+        choices=sorted(CFPB_PRODUCTS),
+        default=list(CFPB_PRODUCTS),
+        help="Product keys to download (default: all)",
+    )
+    args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("\nPulling Credit Card complaints...\n")
+    for key in args.products:
+        product = CFPB_PRODUCTS[key]
+        print(f"\nPulling {product} complaints...\n")
+        df = pull_product(product)
 
-    credit_card = pull_product("Credit card")
+        path = RAW_DIR / f"{key}.csv"
+        if loses_narratives(path, df):
+            path = RAW_DIR / f"{key}.no_narratives.csv"
+            print(
+                f"WARNING: data/raw/{key}.csv has complaint narratives and this download has "
+                f"none (the CFPB no longer publishes them). Kept the old file; saved the new "
+                f"download to {path} instead."
+            )
+        df.to_csv(path, index=False)
+        print(f"{product}: {len(df):,} rows saved to {path}")
 
-    print("\nPulling Mortgage complaints...\n")
-
-    mortgage = pull_product("Mortgage")
-
-    # Save Credit Card data
-    credit_card.to_csv(
-        RAW_DIR / "credit_card.csv",
-        index=False,
-    )
-
-    # Save Mortgage data
-    mortgage.to_csv(
-        RAW_DIR / "mortgage.csv",
-        index=False,
-    )
-
-    print("\nDownload complete.")
-
-    print(f"Credit Card rows: {len(credit_card):,}")
-
-    print(f"Mortgage rows: {len(mortgage):,}")
-
-    print(f"\nCredit Card saved to:\n{RAW_DIR / 'credit_card.csv'}")
-
-    print(f"\nMortgage saved to:\n{RAW_DIR / 'mortgage.csv'}")
+    print("\nDownload complete. Next: python -m ingestion.clean")
 
 
 if __name__ == "__main__":

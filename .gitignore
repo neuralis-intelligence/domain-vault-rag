@@ -24,6 +24,7 @@ data/processed/*
 
 # Evaluation output
 eval/eval_results.csv
+eval/results/
 
 # OS
 .DS_Store
