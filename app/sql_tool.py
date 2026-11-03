@@ -40,6 +40,7 @@ FORBIDDEN_KEYWORDS = (
 )
 _FORBIDDEN_RE = re.compile(r"\b(" + "|".join(FORBIDDEN_KEYWORDS) + r")\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\bLIMIT\s+(\d+)\s*$", re.IGNORECASE)
+_TRAILING_LIMITS_RE = re.compile(r"(?:\s*\bLIMIT\s+\d+)+\s*$", re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(r"^```(?:sql)?\s*|\s*```$", re.IGNORECASE)
 
 
@@ -140,6 +141,12 @@ class SQLTool:
         match = _FORBIDDEN_RE.search(sql)
         if match:
             raise SQLValidationError(f"Forbidden keyword found: {match.group(1).upper()}")
+
+        # Small models sometimes stack clauses ("... LIMIT 5\nLIMIT 1"), a syntax error.
+        # Keep only the most restrictive one.
+        stacked = _TRAILING_LIMITS_RE.search(sql)
+        if stacked and len(found := re.findall(r"\d+", stacked.group())) > 1:
+            sql = f"{sql[: stacked.start()]}\nLIMIT {min(map(int, found))}"
 
         limit = _LIMIT_RE.search(sql)
         if limit is None:
